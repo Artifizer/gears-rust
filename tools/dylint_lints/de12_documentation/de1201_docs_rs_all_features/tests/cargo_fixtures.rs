@@ -37,7 +37,6 @@ fn run_fixture_with_env(name: &str, extra_env: &[(&str, &str)]) -> Output {
     let fixture = fixtures_dir().join(name);
     let manifest_path = fixture.join("Cargo.toml");
     let lint_parent_dir = lint_parent_dir();
-    let target_dir = target_dir().join("de1201_cargo_fixtures").join(name);
 
     let mut command = Command::new("cargo");
     command
@@ -49,8 +48,7 @@ fn run_fixture_with_env(name: &str, extra_env: &[(&str, &str)]) -> Output {
         .arg("--manifest-path")
         .arg(&manifest_path)
         .arg("--no-deps")
-        .arg("--quiet")
-        .env("CARGO_TARGET_DIR", target_dir)
+        .env_remove("CARGO_TARGET_DIR")
         .env_remove(ENV_EXCLUDED_CRATES)
         .env_remove("DYLINT_RUSTFLAGS")
         .env_remove("DYLINT_TOML")
@@ -80,14 +78,6 @@ fn lint_parent_dir() -> PathBuf {
         .parent()
         .expect("lint crate should have a parent directory")
         .to_path_buf()
-}
-
-fn target_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("lint crate should be inside the Dylint workspace")
-        .join("target")
 }
 
 fn remove_fixture_lockfile(fixture: &Path) {
