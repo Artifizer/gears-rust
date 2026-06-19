@@ -696,6 +696,11 @@ def check_port_available(port):
 
 
 def get_llvm_cov_env():
+    # `show-env --sh` emits POSIX `export KEY='value'` lines. Values are
+    # single-quoted, so parsing with shlex(posix=True) preserves Windows
+    # backslash paths verbatim (single quotes are literal in POSIX) -- this
+    # parser is therefore cross-platform; do not switch to a backslash-aware
+    # mode that would corrupt these paths.
     result = run_cmd_capture(
         ["cargo", "llvm-cov", "show-env", "--sh"],
         cwd=PROJECT_ROOT,

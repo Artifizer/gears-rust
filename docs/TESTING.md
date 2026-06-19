@@ -248,6 +248,26 @@ python scripts/ci.py fuzz --seconds 60  # fuzz smoke run
 python scripts/ci.py fuzz-run fuzz_odata_filter --seconds 300  # single target
 ```
 
+> The helper scripts live under `tools/scripts/` (e.g.
+> `python tools/scripts/ci.py ...`). On Windows invoke them with `python`
+> (the `python3` alias is frequently absent).
+
+Code coverage is produced by a separate script, `coverage.py`:
+
+```bash
+python tools/scripts/coverage.py unit       # unit-test coverage
+python tools/scripts/coverage.py e2e-local  # e2e-local coverage
+python tools/scripts/coverage.py combined   # unit + e2e-local (== make coverage)
+```
+
+Prerequisites (install once; `make setup` handles these on supported hosts):
+
+```bash
+pip install -r testing/e2e/requirements.txt   # pytest + httpx (e2e tests)
+pip install -r testing/requirements.txt        # PyYAML + requests (coverage.py)
+cargo install cargo-llvm-cov                    # coverage backend (works on Windows too)
+```
+
 ### 7.2 Makefile shortcuts (Unix / Linux / macOS)
 
 The `Makefile` wraps the same operations for convenience:

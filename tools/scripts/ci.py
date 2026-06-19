@@ -359,10 +359,23 @@ def cmd_e2e(args):
         print("Starting cf-gears-server for local E2E...")
 
         # Build only the release binary required for local execution.
+        # Invoke cargo directly (mirrors the Makefile `cargo-build` target)
+        # instead of shelling out to `make`, which is unavailable on Windows
+        # where this script is the documented entry point.
         step("Building release binary for local E2E")
-        run_cmd(["make", "cargo-build"])
+        build_cmd = [
+            "cargo",
+            "build",
+            "--release",
+            "--bin",
+            "cf-gears-example-server",
+        ]
+        e2e_features = read_e2e_features(Path(PROJECT_ROOT))
+        if e2e_features:
+            build_cmd.extend(["--features", e2e_features])
+        run_cmd(build_cmd)
 
-        # Use the release binary produced by cargo-build
+        # Use the release binary produced by the cargo build above
         release_bin = str(find_binary(
             Path(PROJECT_ROOT) / "target", "release", "cf-gears-example-server"
         ))
