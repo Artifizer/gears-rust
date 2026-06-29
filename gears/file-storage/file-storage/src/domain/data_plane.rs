@@ -76,6 +76,11 @@ impl DataPlaneService {
         // Content-type validation against the actual bytes.
         mime::validate(declared_mime, &bytes)?;
 
+        // Preflight authorization BEFORE touching the backend, so a rejected
+        // request never persists or overwrites blob content. The post-write
+        // `finalize_upload` re-checks as defense-in-depth.
+        self.control.authorize_write(ctx, file_id).await?;
+
         let version = self
             .store
             .get_version(file_id, version_id)

@@ -106,10 +106,8 @@ impl Store {
     // ── create ───────────────────────────────────────────────────────────────
 
     /// Insert a new file row + a pending version row + any initial custom-
-    /// metadata entries in sequence (no transaction needed: these are
-    /// independent inserts and the pending version is invisible until
-    /// `finalize_version` + `bind_atomic`). Returns the new `(file_id,
-    /// version_id)` pair plus the backend location chosen for the upload.
+    /// metadata entries in ONE transaction, so a failure partway through cannot
+    /// leave a visible file with no version (or partial metadata) behind.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_file_with_pending_version(
         &self,
@@ -121,8 +119,6 @@ impl Store {
         backend_path: &str,
         now: OffsetDateTime,
     ) -> Result<(), DomainError> {
-        let conn = self.db.conn().map_err(db_err)?;
-
         let file = File {
             file_id,
             tenant_id,
@@ -135,10 +131,6 @@ impl Store {
             created_at: now,
             last_modified_at: now,
         };
-        self.files
-            .create(&conn, &AccessScope::allow_all(), &file)
-            .await?;
-
         let pending = pending_version(
             file_id,
             version_id,
@@ -147,24 +139,33 @@ impl Store {
             backend_path,
             now,
         );
-        self.versions
-            .insert(&conn, &AccessScope::allow_all(), &pending)
-            .await?;
+        // Own the initial metadata entries so the transaction closure can move them.
+        let metadata_entries: Vec<(String, String)> = new
+            .custom_metadata
+            .iter()
+            .map(|e| (e.key.clone(), e.value.clone()))
+            .collect();
 
-        for entry in &new.custom_metadata {
-            self.metadata
-                .upsert(
-                    &conn,
-                    &AccessScope::allow_all(),
-                    file_id,
-                    &entry.key,
-                    &entry.value,
-                    now,
-                )
-                .await?;
-        }
-
-        Ok(())
+        let files = self.files.clone();
+        let versions = self.versions.clone();
+        let metadata = self.metadata.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    files.create(tx, &AccessScope::allow_all(), &file).await?;
+                    versions
+                        .insert(tx, &AccessScope::allow_all(), &pending)
+                        .await?;
+                    for (key, value) in &metadata_entries {
+                        metadata
+                            .upsert(tx, &AccessScope::allow_all(), file_id, key, value, now)
+                            .await?;
+                    }
+                    Ok::<(), DomainError>(())
+                })
+            })
+            .await
     }
 
     // ── version management ───────────────────────────────────────────────────
@@ -214,13 +215,16 @@ impl Store {
     }
 
     /// Return the MIME type of the file's current (bound) version, if any.
-    pub async fn current_version_mime(&self, file: &File) -> Option<String> {
-        let content_id = file.content_id?;
-        self.get_version(file.file_id, content_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v.mime_type)
+    /// `Ok(None)` means there is genuinely no bound content; a DB/connection
+    /// failure is propagated as `Err` (never silently treated as "no mime").
+    pub async fn current_version_mime(&self, file: &File) -> Result<Option<String>, DomainError> {
+        let Some(content_id) = file.content_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .get_version(file.file_id, content_id)
+            .await?
+            .map(|v| v.mime_type))
     }
 
     /// Record a version's size + hash and mark it `available`.

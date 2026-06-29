@@ -1,10 +1,10 @@
 //! Pure ETag formula for the file-storage control plane.
 //!
 //! The content ETag is a deterministic opaque token derived from `(file_id,
-//! content_id)` via a keyed SHA-256 prefix. It is opaque by design — it never
-//! encodes the raw content hash that backs the version row — and is defined once
-//! here so every call site (service, DTO, handler) reads from the same source of
-//! truth.
+//! content_id)` via a SHA-256 over a domain-separation prefix (not a secret key —
+//! it is a fingerprint, not a MAC). It is opaque by design — it never encodes the
+//! raw content hash that backs the version row — and is defined once here so every
+//! call site (service, DTO, handler) reads from the same source of truth.
 
 // Domain terms (ETag, If-Match) appear in comments below.
 #![allow(clippy::doc_markdown)]

@@ -208,7 +208,7 @@ impl FileService {
         let mime_type = self
             .store
             .current_version_mime(&file)
-            .await
+            .await?
             .unwrap_or_else(|| "application/octet-stream".to_owned());
 
         self.store
@@ -243,6 +243,25 @@ impl FileService {
 
     /// Record an uploaded version's size+hash and mark it available. Called by
     /// the sidecar after streaming bytes to the backend (write action).
+    /// Authorize a write to `file_id` (WRITE action) without mutating anything.
+    /// The data plane calls this as a preflight **before** writing bytes to a
+    /// backend, so a rejected request never persists/overwrites blob content
+    /// (the post-write `finalize_upload` re-checks as defense-in-depth).
+    pub async fn authorize_write(
+        &self,
+        ctx: &SecurityContext,
+        file_id: Uuid,
+    ) -> Result<(), DomainError> {
+        let file = self
+            .store
+            .require_file(&Self::tenant_scope(ctx), file_id)
+            .await?;
+        self.authorizer
+            .authorize(ctx, actions::WRITE, &file.gts_file_type, Some(file_id))
+            .await?;
+        Ok(())
+    }
+
     pub async fn finalize_upload(
         &self,
         ctx: &SecurityContext,
