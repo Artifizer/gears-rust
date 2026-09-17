@@ -95,6 +95,7 @@ bss-approvals = ["dep:bss_approvals"]
 # The admission gate links its default engine plugin, policy-engine.
 admission-control = ["dep:admission-control", "policy-engine"]
 policy-engine = ["dep:policy-engine"]
+prompt-scanner-example = ["dep:prompt_scanner", "dep:always_allow_plugin", "dep:regex_scanner", "dep:onnx_scanner"]
 
 [dependencies]
 mimalloc = { workspace = true }
@@ -188,6 +189,11 @@ admission-control = { package = "cf-gears-admission-control", path = "../../gear
 
 # Optional Policy Engine gear (an admission-control engine plugin)
 policy-engine = { package = "cf-gears-policy-engine", path = "../../gears/system/policy-engine/policy-engine", optional = true }
+# Optional prompt-scanner gear + its scanner backend plugins
+prompt_scanner = { package = "cf-gears-prompt-scanner", path = "../../gears/prompt-scanner/prompt-scanner", optional = true }
+always_allow_plugin = { package = "cf-gears-always-allow-plugin", path = "../../gears/prompt-scanner/plugins/always-allow-plugin", optional = true }
+regex_scanner = { package = "cf-gears-regex-scanner", path = "../../gears/prompt-scanner/plugins/regex-scanner", optional = true }
+onnx_scanner = { package = "cf-gears-onnx-scanner", path = "../../gears/prompt-scanner/plugins/onnx-scanner", optional = true }
 
 # Optional Model Registry gear
 model_registry = { package = "cf-gears-model-registry", path = "../../gears/model-registry/model-registry", optional = true }

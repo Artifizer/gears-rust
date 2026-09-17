@@ -1,0 +1,90 @@
+[package]
+name = "cf-gears-prompt-scanner"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "prompt-scanner gear - tenant-aware content-scanning / verdict microservice"
+repository.workspace = true
+readme = "README.md"
+keywords = ["constructorfabric", "cf-gears"]
+categories = ["web-programming"]
+metadata.docs.rs.all-features = true
+
+[lib]
+name = "prompt_scanner"
+
+[lints]
+workspace = true
+
+[features]
+# The PostgreSQL migration suite (tests/pg_migrations_test.rs): a real
+# PostgreSQL in a container, Docker required. Run with
+# `cargo nextest run -p cf-gears-prompt-scanner --features integration --test pg_migrations_test`.
+integration = []
+
+[dependencies]
+# Local dependencies
+prompt-scanner-sdk = { package = "cf-gears-prompt-scanner-sdk", version = "0.1.0", path = "../prompt-scanner-sdk" }
+types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.6.0", path = "../../system/types-registry/types-registry-sdk" }
+types-registry = { workspace = true }
+authz-resolver-sdk = { workspace = true }
+authz-resolver = { workspace = true }
+file-parser-sdk = { package = "cf-gears-file-parser-sdk", version = "0.2.8", path = "../../file-parser/file-parser-sdk" }
+file-parser = { package = "cf-gears-file-parser", version = "0.2.7", path = "../../file-parser/file-parser" }
+
+# ToolKit dependencies
+toolkit = { workspace = true }
+toolkit-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
+toolkit-db-macros = { workspace = true }
+toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
+
+# Async runtime
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+
+# HTTP / REST
+axum = { workspace = true }
+http = { workspace = true }
+utoipa = { workspace = true }
+
+# Data types
+uuid = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+
+# Database
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+
+# Error handling and serialization
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+
+# Required by toolkit::gear macro
+inventory = { workspace = true }
+
+# Logging and metrics
+tracing = { workspace = true }
+opentelemetry = { workspace = true }
+humantime-serde = { workspace = true }
+humantime = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+tower = { workspace = true }
+proptest = { workspace = true }
+tracing-test = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+test-containers = { workspace = true }
+types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.6.0", path = "../../system/types-registry/types-registry-sdk", features = [
+    "test-util",
+] }

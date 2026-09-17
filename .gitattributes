@@ -12,6 +12,7 @@
 *.exe binary
 *.so binary
 *.dll binary
+*.onnx binary
 *.rs     text eol=lf
 *.toml   text eol=lf
 *.stderr text eol=lf

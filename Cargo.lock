@@ -1802,6 +1802,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-always-allow-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cf-gears-prompt-scanner-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-api-gateway"
 version = "0.7.6"
 dependencies = [
@@ -2955,6 +2975,7 @@ dependencies = [
  "cf-chat-engine",
  "cf-gears-account-management",
  "cf-gears-admission-control",
+ "cf-gears-always-allow-plugin",
  "cf-gears-api-gateway",
  "cf-gears-authn-resolver",
  "cf-gears-authz-resolver",
@@ -2982,9 +3003,12 @@ dependencies = [
  "cf-gears-model-registry",
  "cf-gears-nodes-registry",
  "cf-gears-oagw",
+ "cf-gears-onnx-scanner",
  "cf-gears-policy-engine",
+ "cf-gears-prompt-scanner",
  "cf-gears-quota-enforcement",
  "cf-gears-quota-enforcement-storage-plugin",
+ "cf-gears-regex-scanner",
  "cf-gears-resource-group",
  "cf-gears-rg-tr-plugin",
  "cf-gears-service-discovery",
@@ -3027,6 +3051,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cf-gears-file-parser-sdk",
+ "cf-gears-ort-bootstrap",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-macros",
@@ -4043,6 +4068,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-onnx-scanner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "cf-gears-onnx-scanner",
+ "cf-gears-prompt-scanner-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-onnx-runtime",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "http",
+ "http-body-util",
+ "humantime-serde",
+ "inventory",
+ "opentelemetry",
+ "proptest",
+ "prost",
+ "regex",
+ "serde",
+ "serde-saphyr 1.3.0",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokenizers",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-ort-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "cf-gears-policy-engine"
 version = "0.1.0"
 dependencies = [
@@ -4132,6 +4205,73 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-prompt-scanner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "cf-gears-authz-resolver",
+ "cf-gears-authz-resolver-sdk",
+ "cf-gears-file-parser",
+ "cf-gears-file-parser-sdk",
+ "cf-gears-prompt-scanner-sdk",
+ "cf-gears-test-containers",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-db",
+ "cf-gears-toolkit-db-macros",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "chrono",
+ "futures",
+ "http",
+ "humantime",
+ "humantime-serde",
+ "inventory",
+ "opentelemetry",
+ "proptest",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-test",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-prompt-scanner-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-security",
+ "chrono",
+ "gts",
+ "humantime-serde",
+ "proptest",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
  "uuid",
 ]
 
@@ -4259,6 +4399,29 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-regex-scanner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cf-gears-prompt-scanner-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "inventory",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -9982,6 +10145,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "onig"
+version = "6.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
+dependencies = [
+ "bitflags",
+ "libc",
+ "once_cell",
+ "onig_sys",
+]
+
+[[package]]
+name = "onig_sys"
+version = "69.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e68317604e77e53b85896388e1a803c1d21b74c899ec9e5e1112db90735edd7"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13479,6 +13664,7 @@ dependencies = [
  "log",
  "macro_rules_attribute",
  "monostate",
+ "onig",
  "paste",
  "rand 0.9.4",
  "rayon",
