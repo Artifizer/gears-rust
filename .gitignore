@@ -579,6 +579,10 @@ testing/e2e/logs/
 *.backup*
 .cf-studio/config/kits/sdlc/*
 .cf-studio/.cache/explore/*
+.cf-studio/.cache/decisions.jsonl
+.cf-studio/.cache/decisions.jsonl.1
+.cf-studio/.cache/decisions.jsonl.lock
+.cf-studio/.cache/doc-index/
 .cf-studio/.cache/planning/*
 
 # code-ranker reports
