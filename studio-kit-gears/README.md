@@ -2,19 +2,19 @@
 
 **ID**: `gears`
 **Format**: `Constructor Studio` (targets Studio v1.7.0 or later)
-**Purpose**: Use CF/Gears’s documentation templates (`docs/spec-templates/*`) and expert checklists (`docs/checklists/*`).
+**Purpose**: Own CF/Gears’s SDLC document templates, examples, and expert checklists (`artifacts/<KIND>/`), and the Studio workflows that author, validate, and review gear documents and code.
 
 ## Artifact kinds
 
-| Kind | Template source | Rules | Checklist source |
-|------|-----------------|-------|------------------|
-| UPSTREAM_REQS | `docs/spec-templates/gears-sdlc/UPSTREAM_REQS/template.md` | `artifacts/UPSTREAM_REQS/rules.md` | `docs/checklists/UPSTREAM_REQS.md` |
-| PRD | `docs/spec-templates/gears-sdlc/PRD/template.md` | `artifacts/PRD/rules.md` | `docs/checklists/PRD.md` |
-| ADR | `docs/spec-templates/gears-sdlc/ADR/template.md` | `artifacts/ADR/rules.md` | `docs/checklists/ADR.md` |
-| DESIGN | `docs/spec-templates/gears-sdlc/DESIGN/template.md` | `artifacts/DESIGN/rules.md` | `docs/checklists/DESIGN.md` |
-| DECOMPOSITION | `docs/spec-templates/gears-sdlc/DECOMPOSITION/template.md` | `artifacts/DECOMPOSITION/rules.md` | `docs/checklists/DECOMPOSITION.md` |
-| FEATURE | `docs/spec-templates/gears-sdlc/FEATURE/template.md` | `artifacts/FEATURE/rules.md` | `docs/checklists/FEATURE.md` |
-| CODE | — | `codebase/rules.md`, `codebase/design-led-rules.md` | `docs/checklists/CODING.md` |
+| Kind | Template | Rules | Checklist |
+|------|----------|-------|-----------|
+| UPSTREAM_REQS | `artifacts/UPSTREAM_REQS/template.md` | `artifacts/UPSTREAM_REQS/rules.md` | `artifacts/UPSTREAM_REQS/checklist.md` |
+| PRD | `artifacts/PRD/template.md` | `artifacts/PRD/rules.md` | `artifacts/PRD/checklist.md` |
+| ADR | `artifacts/ADR/template.md` | `artifacts/ADR/rules.md` | `artifacts/ADR/checklist.md` |
+| DESIGN | `artifacts/DESIGN/template.md` | `artifacts/DESIGN/rules.md` | `artifacts/DESIGN/checklist.md` |
+| DECOMPOSITION | `artifacts/DECOMPOSITION/template.md` | `artifacts/DECOMPOSITION/rules.md` | `artifacts/DECOMPOSITION/checklist.md` |
+| FEATURE | `artifacts/FEATURE/template.md` | `artifacts/FEATURE/rules.md` | `artifacts/FEATURE/checklist.md` |
+| CODE | — | `codebase/rules.md`, `codebase/design-led-rules.md` | `codebase/checklist.md` |
 
 ## How a preset runs
 
