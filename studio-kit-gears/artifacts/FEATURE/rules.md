@@ -31,10 +31,7 @@
 - [ ] Give every CDSL step line a checkbox, a phase token, and an `inst-*` ID that is unique within its flow or algorithm
 
 ### Semantic
-- [ ] Write every CDSL step in plain, language-agnostic English: no programming operators, no function syntax, no type annotations
-  - VALID: "**IF** the session lifecycle state is hard_deleted **RETURN** 404 Not Found"
-  - INVALID: "**IF** session.lifecycle_state == 'hard_deleted' **RETURN** 404"
-  - INVALID: "**RETURN** `Vec<Capability>`"
+- [ ] Write CDSL step descriptions so that a reader can tell a property from prose: keep identifiers such as `strategy.type` and literal values such as `full` in backticks
 - [ ] Trace the FEATURE to DECOMPOSITION, DESIGN, PRD, ADR, or UPSTREAM_REQS IDs when those sources exist
 - [ ] Preserve PRD coverage integrity and DESIGN principles, constraints, components, sequences, and data references
 - [ ] Preserve SDK-first public contracts, domain/API/infrastructure separation, runtime-owned privileged access, and canonical API and error behavior when they apply
@@ -62,7 +59,7 @@
 
 ### Structural
 - [ ] `cfs validate-toc <path>` passes (validation never rewrites the document)
-- [ ] `cfs validate --artifact <path>` reports zero errors, including the CDSL structure and clarity checks
+- [ ] `cfs validate --artifact <path>` reports zero errors; the CDSL clarity findings (`cdsl-language-operator`, `cdsl-not-plain-english`, `cdsl-type-annotation`) are warnings in this kit and do not gate
 
 ### Semantic
 - [ ] Every CDSL step can be implemented, tested, and traced
@@ -73,7 +70,7 @@
 ## Error Handling
 
 ### Recovery Options
-- [ ] If a CDSL clarity check fails, rewrite the step description in plain English and keep its checkbox, phase token, and `inst-*` ID unchanged
+- [ ] If a CDSL clarity warning points at a genuinely ambiguous step, tighten the wording and keep its checkbox, phase token, and `inst-*` ID unchanged; do not rewrite steps only to silence the warning
 - [ ] If the DECOMPOSITION backreference does not resolve, fix the feature ID against `DECOMPOSITION.md`
 
 ---
