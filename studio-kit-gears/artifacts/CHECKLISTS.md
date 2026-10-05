@@ -81,7 +81,7 @@ Example prompts for using checklists with an AI agent:
 ### Full Review
 
 ```
-Review @docs/my-gear/PRD.md against @docs/checklists/PRD.md checklist.
+Review @docs/my-gear/PRD.md against @studio-kit-gears/artifacts/PRD/checklist.md checklist.
 Output findings in table format: Domain | Item | Severity | Finding | Recommendation
 ```
 
@@ -89,27 +89,27 @@ Output findings in table format: Domain | Item | Severity | Finding | Recommenda
 
 ```
 Review @docs/my-gear/DESIGN.md for Security (SEC) items only.
-Use @docs/checklists/DESIGN.md as reference.
+Use @studio-kit-gears/artifacts/DESIGN/checklist.md as reference.
 ```
 
 ### Critical Issues Only
 
 ```
-Scan @docs/my-gear/FEATURE.md against @docs/checklists/FEATURE.md.
+Scan @docs/my-gear/FEATURE.md against @studio-kit-gears/artifacts/FEATURE/checklist.md.
 Report only CRITICAL and HIGH severity issues.
 ```
 
 ### Review with Auto-Fix
 
 ```
-Review @docs/my-gear/ADR.md against @docs/checklists/ADR.md.
+Review @docs/my-gear/ADR.md against @studio-kit-gears/artifacts/ADR/checklist.md.
 For each finding, propose a concrete fix. Apply fixes directly if severity is MEDIUM or lower.
 ```
 
 ### Batch Review
 
 ```
-Review all artifacts in @docs/my-gear/ against corresponding checklists in @docs/checklists/.
+Review all artifacts in @docs/my-gear/ against the matching @studio-kit-gears/artifacts/<KIND>/checklist.md files.
 Summarize by artifact, then by domain.
 ```
 
@@ -117,13 +117,13 @@ Summarize by artifact, then by domain.
 
 ```
 I'm about to commit changes to @docs/my-gear/PRD.md.
-Quick check against @docs/checklists/PRD.md — any CRITICAL issues?
+Quick check against @studio-kit-gears/artifacts/PRD/checklist.md — any CRITICAL issues?
 ```
 
 ### Generate Missing Content
 
 ```
-Based on @docs/checklists/DESIGN.md, identify missing sections in @docs/my-gear/DESIGN.md.
+Based on @studio-kit-gears/artifacts/DESIGN/checklist.md, identify missing sections in @docs/my-gear/DESIGN.md.
 Generate draft content for missing CRITICAL items.
 ```
 

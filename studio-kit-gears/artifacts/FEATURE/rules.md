@@ -59,7 +59,7 @@
 
 ### Structural
 - [ ] `cfs validate-toc <path>` passes (validation never rewrites the document)
-- [ ] `cfs validate --artifact <path>` reports zero errors; the CDSL clarity findings (`cdsl-language-operator`, `cdsl-not-plain-english`, `cdsl-type-annotation`) are warnings in this kit and do not gate
+- [ ] `cfs validate --artifact <path>` reports zero errors. The CDSL clarity findings (`cdsl-language-operator`, `cdsl-not-plain-english`, `cdsl-type-annotation`) are declared warnings in `constraints.toml`, which Studio 1.8.0 and later apply; Studio 1.7.0 still reports them as errors — move the Studio pin to 1.8.0 rather than rewriting steps to silence them
 
 ### Semantic
 - [ ] Every CDSL step can be implemented, tested, and traced

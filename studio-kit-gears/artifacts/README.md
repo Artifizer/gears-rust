@@ -163,9 +163,7 @@ Feature files bridge the gap between high-level requirements (PRD) and implement
 
 Unlike PRD which answers "what do we need?", Feature files answer "how exactly does it work?" — step by step, with precise inputs, outputs, conditions, and error handling. This makes them directly translatable to code and testable against acceptance criteria.
 
-**CDSL pseudo-code is optional:**
-- **Use** for early-stage projects, complex domains, onboarding new team members, or when precise behavior must be communicated
-- **Skip** for mature teams or simple features — avoid documentation overhead when everyone already understands the flow
+**CDSL is required for kit-authored FEATURE documents**: flows, algorithms, states, and the definition of done are written as CDSL steps with a checkbox, a phase token, and an `inst-*` ID each (see [FEATURE/rules.md](./FEATURE/rules.md)); `cfs validate` and the `@cpt-*` code markers depend on them. Treating CDSL as optional applies only when these templates are used standalone, outside Constructor Studio.
 
 ## Document Placement
 
