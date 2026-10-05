@@ -267,7 +267,7 @@ Constructor Studio IDs must be unique. When Constructor Studio tooling is connec
 - Verify cross-document consistency
 ### Kind Reference
 
-These are **suggested** kind names for common artifact types. Constructor Studio does not enforce specific kind values — use whatever naming makes sense for your project. The important thing is consistency within your codebase.
+These are the kind names the gears kit defines. In this kit they are not suggestions: `constraints.toml` declares the allowed kinds and ID patterns for every artifact, and `cfs validate` reports an ID of an unknown kind or shape as an error. When the templates are used standalone, outside Constructor Studio, any consistent naming works.
 
 |Kind|Description|
 |------|-------------|
@@ -291,7 +291,7 @@ These are **suggested** kind names for common artifact types. Constructor Studio
 - `cpt-examples-todo-app-adr-local-storage` — ADR ID
 - `cpt-examples-todo-app-feature-core` — Feature ID
 
-> **Note**: You can use any slug that fits your domain. For example, `cpt-billing-usecase-checkout` or `cpt-auth-nfr-token-expiry` are equally valid if your team prefers more specific kinds. Constructor Studio validation only checks that referenced IDs exist — it does not validate kind names.
+> **Note**: The slug is free: `cpt-billing-usecase-checkout` or `cpt-auth-nfr-token-expiry` are equally valid. The kind segment is not — `cfs validate` checks the ID pattern and kind against `constraints.toml`, in addition to the reference, duplicate, and cross-document checks described under Validation.
 
 ## Example
 
