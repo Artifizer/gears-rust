@@ -57,7 +57,7 @@ Chosen option: "Stateful gear, value-only backend". The gear owns the `credstore
 * hierarchical resolution becomes **one indexed SQL query** over the ancestor chain plus at most **one** backend read for the winning row;
 * authorization becomes a PDP `AccessScope` **enforced in SQL** through SecureORM clamps on the metadata table (fail-closed, anti-enumeration 404 preserved);
 * secret identity is a DB row — the ExternalID encoding and its collision analysis disappear;
-* writes become explicit **sagas** over the metadata row and backend value, with a lifecycle `status` column and a reaper (see [ADR-0002](0002-cpt-cf-credstore-adr-deprovisioning-saga.md));
+* writes became explicit **sagas** over the metadata row and backend value, with a lifecycle `status` column and a reaper (see [ADR-0002](0002-cpt-cf-credstore-adr-deprovisioning-saga.md)); **superseded by [ADR-0006](0006-cpt-cf-credstore-adr-immutable-value-versions.md)**, which has no saga, status or reaper;
 * optimistic concurrency (`version` / `ETag` / `If-Match`) becomes possible at the metadata layer;
 * the private↔non-private "migration" hazard is designed out: the two classes coexist under one reference and the transition is simply rejected as unsupported.
 
@@ -68,7 +68,7 @@ Chosen option: "Stateful gear, value-only backend". The gear owns the `credstore
 * Good, because backends need no metadata schema — the in-memory static plugin and any future vault plugin implement the same five-operation versioned value-store contract
 * Good, because versioning, lifecycle statuses, and metadata-only future features (list, types) become cheap
 * Bad, because the gear becomes a stateful gear: it needs a database, migrations, and the `stateful` capability
-* Bad, because metadata and backend value can diverge transiently on partial failure — this cost is contained by the saga + reaper design ([ADR-0002](0002-cpt-cf-credstore-adr-deprovisioning-saga.md))
+* Bad, because metadata and backend value can diverge transiently on partial failure — this cost was first contained by the saga + reaper design ([ADR-0002](0002-cpt-cf-credstore-adr-deprovisioning-saga.md)), now replaced by immutable versions with recorded cleanup debts ([ADR-0006](0006-cpt-cf-credstore-adr-immutable-value-versions.md))
 
 ### Confirmation
 
