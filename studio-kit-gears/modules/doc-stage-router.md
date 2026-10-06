@@ -37,10 +37,14 @@ PURPOSE: Pick the stage from the pinned handoff, the request wording, or the def
 DO:
   SET GEARS_STAGE = NEXT_ACTION_PAYLOAD.GEARS_STAGE WHEN NEXT_ACTION_PAYLOAD contains GEARS_STAGE
   SET GEARS_TARGET_PATH = NEXT_ACTION_PAYLOAD.GEARS_TARGET_PATH WHEN NEXT_ACTION_PAYLOAD contains GEARS_TARGET_PATH
+  EMIT "Ignoring the unknown stage '<GEARS_STAGE>' and its handoff payload; resolving the stage from the request instead." and SET GEARS_STAGE = unset and SET NEXT_ACTION_PAYLOAD = unset WHEN GEARS_STAGE is set and is not one of author, validate, review, fix, close
   SET GEARS_FORWARD_PAYLOAD = NEXT_ACTION_PAYLOAD without GEARS_STAGE and GEARS_TARGET_PATH WHEN NEXT_ACTION_PAYLOAD is set
-  EMIT "Ignoring unknown stage '<GEARS_STAGE>' from the handoff; resolving the stage from the request instead." and SET GEARS_STAGE = unset WHEN GEARS_STAGE is set and is not one of author, validate, review, fix, close
-  SET GEARS_STAGE = validate, review, fix, or close WHEN GEARS_STAGE == unset AND the request explicitly asks to validate or check, review, fix findings, or close the artifact
+  EMIT "Review, fix, and close run from the router's own handoff; starting at validate so the gate evidence exists." and SET GEARS_STAGE = validate WHEN GEARS_STAGE == unset AND the request asks to review, fix findings, or close the artifact
+  SET GEARS_STAGE = validate WHEN GEARS_STAGE == unset AND the request explicitly asks to validate or check the artifact
   SET GEARS_STAGE = author WHEN GEARS_STAGE == unset
+RULES:
+  ALWAYS drop a handoff payload whose stage is unknown before any field of it is forwarded
+  NEVER enter review, fix, or close from request wording alone; those stages require the handoff payload of the stage before them
 ```
 
 ```pdsl
@@ -64,7 +68,7 @@ DO:
   SET artifact_rules = GEARS_DOC_RULES
   SET artifact_checklist = GEARS_DOC_CHECKLIST
   SET artifact_example = GEARS_DOC_EXAMPLE WHEN GEARS_STAGE == review OR GEARS_STAGE == fix
-  SET AUTHOR_TARGET_PATHS = [GEARS_TARGET_PATH] plus the file of GEARS_DOC_COMPANION when it is set and exists, and REVIEW_TARGET_PATHS = [GEARS_TARGET_PATH]
+  SET AUTHOR_TARGET_PATHS and REVIEW_TARGET_PATHS = [GEARS_TARGET_PATH] plus the file of GEARS_DOC_COMPANION when it is set and exists
 RULES:
   ALWAYS keep GEARS_DOC_CHECKLIST review-only for authoring; GEARS_DOC_RULES carries no pre-write checklist directive, so the author does not load it
   ALWAYS keep GEARS_DOC_EXAMPLE out of the author stage so generation follows the template, not the example
@@ -77,7 +81,8 @@ PURPOSE: Require the upstream artifact of the gears chain before authoring.
 DO:
   LOAD {cf-studio-path}/.core/skills/studio/modules/runtime/skill-io-contract-load.md
   RUN SkillIoContractLoad
-  SET AVAILABLE_ARTIFACTS = one gears-upstream-doc descriptor per GEARS_DOC_UPSTREAM entry that resolves to existing files, resolved under the gear the entry names (the target gear unless the entry names another gear)
+  EMIT "<GEARS_DOC_KIND> needs at least one upstream source and the request names none: <GEARS_DOC_UPSTREAM>. Name it and run again." and STOP_TURN WHEN a GEARS_DOC_UPSTREAM entry is tagged required and at least one, and the request resolves it to no entries
+  SET AVAILABLE_ARTIFACTS = one gears-upstream-doc descriptor per file matched by each GEARS_DOC_UPSTREAM entry, resolved under the gear the entry names (the target gear unless the entry names another gear); every matched file is loaded as upstream context, and a required entry is satisfied when at least one file matches
   SET REQUIRED_ARTIFACT_SPECS = one gears-upstream-doc spec per GEARS_DOC_UPSTREAM entry tagged required, with why_needed "The <GEARS_DOC_KIND> must trace to <entry>", accepted_shapes doc-ref, suggested_producers the kit preset that authors that entry's KIND, override_allowed true, override_summary "Proceed without the upstream artifact; traceability to it stays open"; [] when no entry is tagged required
   RUN PrerequisiteCheckContract
   CONTINUE GearsDocStageRoute WHEN PREREQUISITE_STATUS == ready OR OVERRIDE_REQUESTED == explicit-user-approval
@@ -144,8 +149,8 @@ DO:
   RUN `cfs validate-toc <GEARS_TARGET_PATH>` and `cfs validate --artifact <GEARS_TARGET_PATH>`
   RUN check every item of "{gears_doc_phase}#definition-of-done" against those results and the review findings in GEARS_FORWARD_PAYLOAD
   EMIT a SKILL_RESULT envelope with skill = GEARS_DOC_SKILL, status = completed when every definition-of-done item holds else failed, produced_artifacts = doc-changes for GEARS_TARGET_PATH plus phase-status, report_outputs = the validation result, missing_artifacts = every definition-of-done item that fails (validation errors, unresolved CRITICAL or MAJOR finding IDs, uncovered upstream IDs) or [] when all hold, assumptions = any recorded overrides, and suggested_next_skills = [GEARS_DOC_NEXT_SKILL]
-  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_NEXT_SKILL WHEN every definition-of-done item holds
-  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_SKILL and NEXT_ACTION_PAYLOAD = GEARS_STAGE author, GEARS_TARGET_PATH WHEN a definition-of-done item fails
+  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_NEXT_SKILL and NEXT_ACTION_PAYLOAD = the gear of GEARS_TARGET_PATH and GEARS_TARGET_PATH as the upstream document WHEN every definition-of-done item holds
+  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_SKILL and NEXT_ACTION_PAYLOAD = GEARS_STAGE validate, GEARS_TARGET_PATH, plus the failing definition-of-done items WHEN a definition-of-done item fails, so the gate runs again and routes to author or fix from fresh evidence
   LOAD {cf-studio-path}/.core/skills/studio/modules/ui/next-actions.md
   RUN NextActionsOffer
 RULES:

@@ -52,6 +52,7 @@
 - [ ] Generate the Table of Contents with `cfs toc <path>` once the final headings are in place
 - [ ] Keep the `featstatus` checkbox consistent with the flow, algorithm, state, and definition-of-done checkboxes
 - [ ] Preserve existing stable IDs; add new IDs only for new feature or CDSL elements
+- [ ] Re-check that the chosen `NNNN` of the feature file is still free immediately before writing it; if another feature took it, use the next free number
 
 ---
 

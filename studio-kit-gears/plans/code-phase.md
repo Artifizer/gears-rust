@@ -66,4 +66,5 @@ lint set, tests) and `make dylint`, and, for FEATURE-led work, `cfs validate`.
 - [ ] `make gear-ci GEAR=<gear>` and `make dylint` pass.
 - [ ] For FEATURE-led work: `cfs validate` reports zero errors and the FEATURE checkboxes reflect what is implemented; when the traceability mode is FULL, every implemented CDSL ID also has `@cpt-*` markers.
 - [ ] The latest code review against `codebase/checklist.md` has no unresolved CRITICAL or MAJOR findings.
+- [ ] When the slice touches registry, autodetect, or ignore matching, privilege boundaries, Secure ORM, SecurityContext, secrets, FIPS behavior, or other security-boundary logic, the slice summary records the guardrail or deviation, rationale, owner, and validation performed; otherwise it states that no guardrail was touched.
 - [ ] Remaining MINOR findings are listed in the close report.
