@@ -134,7 +134,7 @@ There is no inline `destroy` outside this step, and no store call is made that w
 
 **Executing a debt** is `delete_key` for `purge` and `destroy` with the row's selector and version for `destroy` (no call when the plugin does not support it), followed by deleting the debt row. Both are idempotent, so a repeat by another instance is harmless, and both may run at any time after their commit.
 
-What each supported failure leaves behind and who removes it is catalogued per step in [CORNER-CASES.md](../CORNER-CASES.md) (the tolerated faults and their failure scenarios). The invariants that hold in every case:
+What each supported failure leaves behind and who removes it is catalogued per step in `CORNER-CASES.md` (added with the code in #4741) (the tolerated faults and their failure scenarios). The invariants that hold in every case:
 
 - no pointer is committed without the writer's own intent being deleted in the same transaction, and tx1 requires exactly one deleted row;
 - a debt is recorded in the transaction that makes the store content dead, and executed only after a confirmed commit;
@@ -165,7 +165,7 @@ Healing is a restricted reclaim: it acts only on a record or reference a request
 
 The lease decides *hygiene*: when a heal may act. An intent is protected until `lease_until`, and the lease is chosen well above the longest time a store may still apply a request (deployment requirement, see Data), so a live writer finishes its `put` before its intent can be healed. If that fails (a stall past the lease, or a store that applies a request late, both out-of-model), the writer's tx1 finds its intent gone, rolls back and answers 503, and its version stays untracked (residuals R2a, R2b).
 
-Residuals — R1 to R4b are garbage only and never affect consistency; R6 makes a record unreadable. The failure scenarios that leave them are catalogued in [CORNER-CASES.md](../CORNER-CASES.md):
+Residuals — R1 to R4b are garbage only and never affect consistency; R6 makes a record unreadable. The failure scenarios that leave them are catalogued in `CORNER-CASES.md` (added with the code in #4741):
 
 1. **R1 — Orphan above the pointer of a live record** (a crash, a failed tx1 or a lost `put` answer after `put`): never served; its intent tracks it; removed by the record's next successful secret write or by the record's delete. A record never written or deleted again keeps it.
 2. **R2a — Late put on a live record (untracked).** A `put` that the store applies after the writer's intent was healed lands above the new pointer with no intent and no debt. Never served; removed by the record's next successful write or delete.
