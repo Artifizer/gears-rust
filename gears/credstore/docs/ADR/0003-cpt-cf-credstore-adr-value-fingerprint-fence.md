@@ -8,6 +8,18 @@ Updated:  2026-10-01 by Constructor Tech
 
 # ADR-0003: Value-Fingerprint Fence for the Metadata/Value Dual Write
 
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-credstore-adr-value-fingerprint-fence`
 
 **Superseded by [ADR-0006](0006-cpt-cf-credstore-adr-immutable-value-versions.md).**
