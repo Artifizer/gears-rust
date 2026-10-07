@@ -33,9 +33,9 @@ content scope; the upstream artifacts below fix what the document must cover.
 |------|-----------------------------------|----------|
 | UPSTREAM_REQS | code or docs of the requesting gears | yes |
 | PRD | `UPSTREAM_REQS.md` | when it exists |
-| ADR | `PRD.md` | yes |
+| ADR | `PRD.md`, `DESIGN*.md`, existing `ADR/*.md` | `PRD.md` yes |
 | DESIGN | `PRD.md`, accepted `ADR/*.md`, `UPSTREAM_REQS.md` | `PRD.md` yes |
-| DECOMPOSITION | `DESIGN*.md` | yes |
+| DECOMPOSITION | `DESIGN*.md`, `PRD.md`, accepted `ADR/*.md`, `UPSTREAM_REQS.md` | `DESIGN*.md`, `PRD.md` yes |
 | FEATURE | `DECOMPOSITION.md` entry for the feature, `DESIGN*.md`, `PRD.md`, accepted `ADR/*.md` | `DECOMPOSITION.md` yes |
 
 ### Skill Sequence
@@ -47,7 +47,7 @@ Studio thin skill and pins itself with the next stage.
 |-------|--------------|------|
 | author | `cf-documenting-gen` | document written |
 | validate | `cf-documenting-ci` | gate pass → review; gate fail → author (revise with the CI findings) |
-| review | `cf-documenting-review` | no findings → close; findings → fix |
+| review | `cf-documenting-review` | no CRITICAL or MAJOR finding → close (MINOR ones go to the close report); otherwise → fix |
 | fix | `cf-documenting-fix` | fixes applied and re-validated → review |
 | close | kit-owned | definition of done checked; next artifact in the chain offered |
 

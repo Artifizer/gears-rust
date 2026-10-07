@@ -47,7 +47,7 @@ The canonical gear layout from
 | tests | `cf-coding-tests` | failing tests for the slice exist |
 | author | `cf-coding-gen` | slice implemented |
 | validate | `cf-coding-ci` | gate pass → review; gate fail → author (fix with the CI findings) |
-| review | `cf-coding-review` | no findings → close; findings → fix |
+| review | `cf-coding-review` | no CRITICAL or MAJOR finding → close (MINOR ones go to the close report); otherwise → fix |
 | fix | `cf-coding-fix` | fixes applied and re-validated → review |
 | close | kit-owned | definition of done checked; next slice or next step offered |
 

@@ -19,6 +19,8 @@ PURPOSE: Resolve the stage and target of this gears document run, then route it.
 STATE:
   SET GEARS_STAGE: author | validate | review | fix | close | unset (default unset, scope workflow_run)
   SET GEARS_TARGET_PATH: path | unset (default unset, scope workflow_run)
+  SET GEARS_GEAR: string | unset (default unset, scope workflow_run)
+  SET GEARS_UPSTREAM_FILES: path-list | unset (default unset, scope workflow_run)
   SET GEARS_FORWARD_PAYLOAD: object | unset (default unset, scope workflow_run)
 DO:
   RUN GearsDocStageResolve
@@ -36,9 +38,9 @@ UNIT GearsDocStageResolve
 PURPOSE: Pick the stage from the pinned handoff, the request wording, or the default.
 DO:
   SET GEARS_STAGE = NEXT_ACTION_PAYLOAD.GEARS_STAGE WHEN NEXT_ACTION_PAYLOAD contains GEARS_STAGE
-  SET GEARS_TARGET_PATH = NEXT_ACTION_PAYLOAD.GEARS_TARGET_PATH WHEN NEXT_ACTION_PAYLOAD contains GEARS_TARGET_PATH
+  SET GEARS_TARGET_PATH and GEARS_GEAR from NEXT_ACTION_PAYLOAD, each WHEN NEXT_ACTION_PAYLOAD contains it
   EMIT "Ignoring the unknown stage '<GEARS_STAGE>' and its handoff payload; resolving the stage from the request instead." and SET GEARS_STAGE = unset and SET NEXT_ACTION_PAYLOAD = unset WHEN GEARS_STAGE is set and is not one of author, validate, review, fix, close
-  SET GEARS_FORWARD_PAYLOAD = NEXT_ACTION_PAYLOAD without GEARS_STAGE and GEARS_TARGET_PATH WHEN NEXT_ACTION_PAYLOAD is set
+  SET GEARS_FORWARD_PAYLOAD = NEXT_ACTION_PAYLOAD without the GEARS_* fields WHEN NEXT_ACTION_PAYLOAD is set
   EMIT "Review, fix, and close run from the router's own handoff; starting at validate so the gate evidence exists." and SET GEARS_STAGE = validate WHEN GEARS_STAGE == unset AND the request asks to review, fix findings, or close the artifact
   SET GEARS_STAGE = validate WHEN GEARS_STAGE == unset AND the request explicitly asks to validate or check the artifact
   SET GEARS_STAGE = author WHEN GEARS_STAGE == unset
@@ -53,8 +55,10 @@ PURPOSE: Resolve the single artifact path this run works on.
 DO:
   SET GEARS_TARGET_PATH = the explicit document path in the request WHEN GEARS_TARGET_PATH == unset AND the request names one
   SET GEARS_TARGET_PATH = the path GEARS_DOC_PATH_RULE derives for the gear named in the request WHEN GEARS_TARGET_PATH == unset AND the request names a gear
+  SET GEARS_TARGET_PATH = the path GEARS_DOC_PATH_RULE derives for GEARS_GEAR, the gear the previous preset handed off, WHEN GEARS_TARGET_PATH == unset AND GEARS_GEAR is set
   EMIT "Which gear is this <GEARS_DOC_KIND> for? Reply with the gear name (the directory under gears/) or the document path." WHEN GEARS_TARGET_PATH == unset
   STOP_TURN WHEN GEARS_TARGET_PATH == unset
+  SET GEARS_GEAR = the gear directory that contains GEARS_TARGET_PATH
 RULES:
   ALWAYS keep one run bound to one artifact path; multi-artifact work belongs in cf-documenting-planning
 ```
@@ -69,6 +73,7 @@ DO:
   SET artifact_checklist = GEARS_DOC_CHECKLIST
   SET artifact_example = GEARS_DOC_EXAMPLE WHEN GEARS_STAGE == review OR GEARS_STAGE == fix
   SET AUTHOR_TARGET_PATHS and REVIEW_TARGET_PATHS = [GEARS_TARGET_PATH] plus the file of GEARS_DOC_COMPANION when it is set and exists
+  SET GEARS_UPSTREAM_FILES = every file matched by each GEARS_DOC_UPSTREAM entry, resolved under the gear the entry names (the target gear unless the entry names another gear); an entry marked accepted matches only ADR files whose status (frontmatter `status:` or a `**Status**:` line) is accepted, case-insensitively
 RULES:
   ALWAYS keep GEARS_DOC_CHECKLIST review-only for authoring; GEARS_DOC_RULES carries no pre-write checklist directive, so the author does not load it
   ALWAYS keep GEARS_DOC_EXAMPLE out of the author stage so generation follows the template, not the example
@@ -82,7 +87,7 @@ DO:
   LOAD {cf-studio-path}/.core/skills/studio/modules/runtime/skill-io-contract-load.md
   RUN SkillIoContractLoad
   EMIT "<GEARS_DOC_KIND> needs at least one upstream source and the request names none: <GEARS_DOC_UPSTREAM>. Name it and run again." and STOP_TURN WHEN a GEARS_DOC_UPSTREAM entry is tagged required and at least one, and the request resolves it to no entries
-  SET AVAILABLE_ARTIFACTS = one gears-upstream-doc descriptor per file matched by each GEARS_DOC_UPSTREAM entry, resolved under the gear the entry names (the target gear unless the entry names another gear); every matched file is loaded as upstream context, and a required entry is satisfied when at least one file matches
+  SET AVAILABLE_ARTIFACTS = one gears-upstream-doc descriptor per file in GEARS_UPSTREAM_FILES; every one is loaded as upstream context, and a required entry is satisfied when at least one of its files is in GEARS_UPSTREAM_FILES
   SET REQUIRED_ARTIFACT_SPECS = one gears-upstream-doc spec per GEARS_DOC_UPSTREAM entry tagged required, with why_needed "The <GEARS_DOC_KIND> must trace to <entry>", accepted_shapes doc-ref, suggested_producers the kit preset that authors that entry's KIND, override_allowed true, override_summary "Proceed without the upstream artifact; traceability to it stays open"; [] when no entry is tagged required
   RUN PrerequisiteCheckContract
   CONTINUE GearsDocStageRoute WHEN PREREQUISITE_STATUS == ready OR OVERRIDE_REQUESTED == explicit-user-approval
@@ -96,6 +101,7 @@ UNIT GearsDocStageRoute
 PURPOSE: Hand the stage to the Studio thin skill that owns it.
 DO:
   RUN GearsDocSupplyPhaseArtifacts WHEN GEARS_STAGE == author
+  RUN GearsDocDispatchContext WHEN GEARS_STAGE != close
   LOAD the Studio workflow documenting-gen.md, documenting-ci.md, documenting-review.md, or documenting-fix.md from {cf-studio-path}/.core/workflows/ WHEN GEARS_STAGE is author, validate, review, or fix respectively
   RUN GearsDocPinNextStage WHEN GEARS_STAGE != close
   RUN GearsDocAnnounceStage WHEN GEARS_STAGE != close
@@ -116,6 +122,16 @@ DO:
 ```
 
 ```pdsl
+UNIT GearsDocDispatchContext
+PURPOSE: Give every stage the upstream documents the authoring stage resolved, so review and fix check traceability against the same sources.
+DO:
+  SET GEARS_DISPATCH_CONTEXT = "Gears kit context (read-only): <GEARS_DOC_KIND> rules <GEARS_DOC_RULES>; target <GEARS_TARGET_PATH>; upstream documents to trace against <GEARS_UPSTREAM_FILES>"
+RULES:
+  ALWAYS paste GEARS_DISPATCH_CONTEXT verbatim into the prompt of every sub-agent this stage dispatches (author, reviewer, fixer)
+  NEVER add an upstream document to REVIEW_TARGET_PATHS; upstream documents are read as context, not reviewed
+```
+
+```pdsl
 UNIT GearsDocSupplyPhaseArtifacts
 PURPOSE: Supply the kit-owned phase prerequisites that cf-documenting-gen checks.
 DO:
@@ -133,10 +149,10 @@ DO:
   SET GEARS_NEXT_STAGE = validate WHEN GEARS_STAGE == author
   SET GEARS_NEXT_STAGE = review WHEN GEARS_STAGE == validate AND GATE_STATUS == pass
   SET GEARS_NEXT_STAGE = author when GATE_STATUS == fail, else validate again (an unset or unknown gate status never advances) WHEN GEARS_STAGE == validate AND GATE_STATUS != pass
-  SET GEARS_NEXT_STAGE = close WHEN GEARS_STAGE == review AND REVIEW_FINDINGS_REMAINING == 0
-  SET GEARS_NEXT_STAGE = fix WHEN GEARS_STAGE == review AND REVIEW_FINDINGS_REMAINING != 0
+  SET GEARS_NEXT_STAGE = close WHEN GEARS_STAGE == review AND ReviewFindingsReport is set AND it has no CRITICAL or MAJOR finding (remaining MINOR findings go to the close report)
+  SET GEARS_NEXT_STAGE = fix when ReviewFindingsReport has a CRITICAL or MAJOR finding, else review again (an unset report never closes) WHEN GEARS_STAGE == review AND (ReviewFindingsReport is unset OR it has a CRITICAL or MAJOR finding)
   SET GEARS_NEXT_STAGE = review WHEN GEARS_STAGE == fix
-  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_SKILL and NEXT_ACTION_PAYLOAD = GEARS_STAGE GEARS_NEXT_STAGE, GEARS_TARGET_PATH, plus the loaded workflow's own handoff fields (FINDINGS, ReviewFindingsReport, APPROVED_REVIEW_FINDING_IDS, REVIEW_FIX_SCOPE, REVIEW_FIX_APPROVED, REVIEW_TARGET_PATHS, REVIEW_TARGET_SLICES, GATE_STATUS) when set
+  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_SKILL and NEXT_ACTION_PAYLOAD = GEARS_STAGE GEARS_NEXT_STAGE, GEARS_TARGET_PATH, GEARS_GEAR, plus the loaded workflow's own handoff fields (FINDINGS, ReviewFindingsReport, APPROVED_REVIEW_FINDING_IDS, REVIEW_FIX_SCOPE, REVIEW_FIX_APPROVED, REVIEW_TARGET_PATHS, REVIEW_TARGET_SLICES, GATE_STATUS) when set
 RULES:
   ALWAYS name the pinned action "<GEARS_DOC_SKILL> — <GEARS_NEXT_STAGE> <GEARS_TARGET_PATH>" so the user sees the stage
   NEVER edit files in the validate stage; a failing gate pins the author stage with the CI findings instead of fixing them in place
@@ -149,8 +165,8 @@ DO:
   RUN `cfs validate-toc <GEARS_TARGET_PATH>` and `cfs validate --artifact <GEARS_TARGET_PATH>`
   RUN check every item of "{gears_doc_phase}#definition-of-done" against those results and the review findings in GEARS_FORWARD_PAYLOAD
   EMIT a SKILL_RESULT envelope with skill = GEARS_DOC_SKILL, status = completed when every definition-of-done item holds else failed, produced_artifacts = doc-changes for GEARS_TARGET_PATH plus phase-status, report_outputs = the validation result, missing_artifacts = every definition-of-done item that fails (validation errors, unresolved CRITICAL or MAJOR finding IDs, uncovered upstream IDs) or [] when all hold, assumptions = any recorded overrides, and suggested_next_skills = [GEARS_DOC_NEXT_SKILL]
-  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_NEXT_SKILL and NEXT_ACTION_PAYLOAD = the gear of GEARS_TARGET_PATH and GEARS_TARGET_PATH as the upstream document WHEN every definition-of-done item holds
-  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_SKILL and NEXT_ACTION_PAYLOAD = GEARS_STAGE validate, GEARS_TARGET_PATH, plus the failing definition-of-done items WHEN a definition-of-done item fails, so the gate runs again and routes to author or fix from fresh evidence
+  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_NEXT_SKILL and NEXT_ACTION_PAYLOAD = GEARS_GEAR and GEARS_UPSTREAM_PATH = GEARS_TARGET_PATH, with no GEARS_STAGE or GEARS_TARGET_PATH, so the next preset starts authoring its own document for the same gear, WHEN every definition-of-done item holds
+  SET NEXT_ACTION_PINNED_SKILL = GEARS_DOC_SKILL and NEXT_ACTION_PAYLOAD = GEARS_STAGE validate, GEARS_TARGET_PATH, GEARS_GEAR, plus the failing definition-of-done items WHEN a definition-of-done item fails, so the gate runs again and routes to author or fix from fresh evidence
   LOAD {cf-studio-path}/.core/skills/studio/modules/ui/next-actions.md
   RUN NextActionsOffer
 RULES:
