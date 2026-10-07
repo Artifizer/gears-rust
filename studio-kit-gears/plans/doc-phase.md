@@ -34,9 +34,9 @@ content scope; the upstream artifacts below fix what the document must cover.
 | UPSTREAM_REQS | code or docs of the requesting gears | yes |
 | PRD | `UPSTREAM_REQS.md` | when it exists |
 | ADR | `PRD.md` | yes |
-| DESIGN | `PRD.md`, accepted `ADR/*.md` | `PRD.md` yes |
+| DESIGN | `PRD.md`, accepted `ADR/*.md`, `UPSTREAM_REQS.md` | `PRD.md` yes |
 | DECOMPOSITION | `DESIGN*.md` | yes |
-| FEATURE | `DECOMPOSITION.md` entry for the feature | yes |
+| FEATURE | `DECOMPOSITION.md` entry for the feature, `DESIGN*.md`, `PRD.md`, accepted `ADR/*.md` | `DECOMPOSITION.md` yes |
 
 ### Skill Sequence
 

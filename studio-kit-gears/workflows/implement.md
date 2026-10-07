@@ -2,12 +2,12 @@
 cf-studio: true
 type: workflow
 name: cf-gears-implement
-description: Invoke when the user asks to implement, build, or write the code for a Gears FEATURE - e.g. "implement", "write the code", "build this feature", "implement FEATURE with @cpt-* traceability". Kit preset that binds the gears code rules and drives the tests, author, validate, review, fix, and close stages through the Studio coding skills.
+description: Invoke when the user asks to implement, build, or write the code for a Gears FEATURE - e.g. "implement", "write the code", "build this feature", "implement FEATURE with @cpt-* traceability". Kit preset that follows the traceability mode set in artifacts.toml (FULL adds @cpt-* code markers, DOCS-ONLY does not), binds the gears code rules and drives the tests, author, validate, review, fix, and close stages through the Studio coding skills.
 version: 2.0
 purpose: Bind the gears code rules for feature-led work and route the requested stage through the gears code stage router.
 ---
 
-# cf-gears-implement - FEATURE-led implementation with `@cpt-*` traceability
+# cf-gears-implement - FEATURE-led implementation, FULL or DOCS-ONLY traceability
 
 Binds the FEATURE source contract, the gears code rules, and the code review
 checklist, then hands control to the shared gears code stage router

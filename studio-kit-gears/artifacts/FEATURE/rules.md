@@ -36,6 +36,7 @@
 - [ ] Preserve PRD coverage integrity and DESIGN principles, constraints, components, sequences, and data references
 - [ ] Preserve SDK-first public contracts, domain/API/infrastructure separation, runtime-owned privileged access, and canonical API and error behavior when they apply
 - [ ] Define testable acceptance criteria and deterministic completion signals
+- [ ] Write the definition of done for the traceability mode the system sets in `artifacts.toml`: FULL expects `@cpt-*` code markers for every implemented CDSL ID, DOCS-ONLY tracks implementation through the FEATURE checkboxes alone
 - [ ] Define security, reliability, data integrity, observability, rollback, test-layering, and compile-time-gate behavior when applicable; otherwise state why not applicable
 - [ ] Document feature-local deviations from shared baselines with the deviation, rationale, and review owner
 - [ ] Exclude new system-level type definitions, API endpoints, architecture decisions, product requirements, sprint tasks, code snippets, test implementation, infrastructure code, and secrets
