@@ -169,7 +169,7 @@ for _, ev := range events {
 }
 ```
 
-Rust's ownership model and the `Send`/`Sync` traits make unsynchronized shared mutable memory across threads a **compile error**. You're forced to use a proper synchronization primitive.
+In safe Rust, the ownership model and the `Send`/`Sync` traits make unsynchronized shared mutable memory across threads a **compile error**. You're forced to use a proper synchronization primitive.
 
 ```rust
 // Rust — won't compile unless the shared state is actually thread-safe.
@@ -185,7 +185,7 @@ for ev in events {
 }
 ```
 
-"If it compiles, it's free of memory data races" is not a slogan — it's enforced by the borrow checker. This does not eliminate logical races such as TOCTOU bugs, lost updates, deadlocks, or bad transaction boundaries; those still need design, tests, and database constraints. For a platform handling concurrent multi-tenant traffic, Rust shifts an important class of concurrency defects from runtime testing into compilation.
+In safe Rust, "if it compiles, it's free of memory data races" is not a slogan — the compiler enforces it. `unsafe` code and FFI can still introduce data races. Gears forbids `unsafe_code` across the workspace, and the few crates that need it opt out explicitly in their manifest. This does not eliminate logical races such as TOCTOU bugs, lost updates, deadlocks, or bad transaction boundaries; those still need design, tests, and database constraints. For a platform handling concurrent multi-tenant traffic, Rust shifts an important class of concurrency defects from runtime testing into compilation.
 
 ### A.3 No `nil` interfaces, no exceptions-from-anywhere
 
