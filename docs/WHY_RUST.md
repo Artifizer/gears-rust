@@ -138,7 +138,7 @@ caller := loadUser("42")
 fmt.Println(caller.Name) // nil pointer dereference at runtime
 ```
 
-In Rust, the error is part of the type. You must deal with it, and there is no `nil`.
+In Rust, the error is part of the type, and there is no `nil`. Ignoring a `Result` triggers the `unused_must_use` warning. The Gears Clippy gate runs with `-D warnings` and denies `let_underscore_must_use`, so a silently dropped `Result` fails the build. You can still discard an error on purpose, but the code must show it.
 
 ```rust
 // Rust — you cannot accidentally ignore the error or deref a null.
