@@ -160,11 +160,11 @@ match load_user("42") {
 Go's race detector is excellent — but it only finds races on code paths you actually execute under instrumentation. Races ship to production all the time.
 
 ```go
-// Go — compiles, runs, and corrupts the map under load. No compile error.
+// Go — compiles, but concurrent map writes may crash the process at runtime.
 counts := map[string]int{}
 for _, ev := range events {
     go func(e Event) {
-        counts[e.Key]++ // concurrent map write -> runtime panic / corruption
+        counts[e.Key]++ // unsynchronized map write; runtime may abort with a fatal error
     }(ev)
 }
 ```
