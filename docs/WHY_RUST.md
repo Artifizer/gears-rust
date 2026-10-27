@@ -338,16 +338,18 @@ Serialization, hashing, equality, ordering, and many schema/DB integrations can 
 Rust also uses types to model resource lifetime. Values are dropped deterministically when they leave scope, so transactions, mutex guards, file handles, tracing spans, and pooled connections can release themselves through `Drop` even when a function returns early with `?`.
 
 ```rust
+// `instrument` keeps the span attached to this future across `.await`.
+// Holding an `.entered()` span guard across `.await` would tag other tasks.
+#[tracing::instrument(skip_all, fields(id = %id))]
 async fn update_document(repo: &Repo, id: DocumentId) -> Result<(), RepoError> {
     let tx = repo.begin().await?;
-    let _span = tracing::info_span!("update_document", %id).entered();
 
     repo.lock_document(&tx, id).await?;
     repo.write_document(&tx, id).await?;
 
     tx.commit().await?;
     Ok(())
-} // span exits; uncommitted guards/resources are dropped on every return path
+} // an uncommitted `tx` and other guards are dropped on every return path
 ```
 
 Go's `defer` and C#'s `using` / `IDisposable` are good mechanisms, and experienced teams use them successfully. Rust's advantage is that scoped ownership is the default shape of the language. You can still design a bad transaction boundary or hold a lock too long, but it is harder to forget cleanup code in ordinary control flow.
