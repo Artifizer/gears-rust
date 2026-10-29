@@ -15,10 +15,9 @@ Gears span three broad categories:
 - **GenAI** gears for chat, retrieval, prompt orchestration, and related AI capabilities.
 
 See also:
-- [WHY_GEARS](docs/WHY_GEARS.md) explaining why to chose Gears for your XaaS project.
+- [WHY_GEARS](docs/WHY_GEARS.md) explaining why to chose Rust/Gears for your XaaS project.
 - [OVERVIEW](docs/slides/1_OVERVIEW.md) HTML slides explaining the key Constructor Fabric Gears concepts.
 - [GEARS](docs/GEARS.md) for gears overview.
-- [WHY_RUST](docs/WHY_RUST.md) explaining why Rust language was chosen.
 
 **Five defining Gears characteristics:**
 
