@@ -1031,5 +1031,5 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 
 - **UPSTREAM_REQS**: [UPSTREAM_REQS.md](./UPSTREAM_REQS.md)
 - **Design**: [DESIGN.md](./DESIGN.md)
-- **ADRs**: [ADR/](./ADR/)
-- **Features**: [features/](./features/)
+- **ADRs**: None yet; approved decisions will be recorded in `docs/ADR/`.
+- **Features**: None yet; implementation specifications will be recorded in `docs/features/`.
