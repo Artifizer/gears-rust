@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authz-resolver", "types-registry", "usage-collector"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/bss/products/products"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Product & SKU Management",
     description = "Multi-tenant catalog registry for products, SKUs, taxonomy, and versioned snapshots.",

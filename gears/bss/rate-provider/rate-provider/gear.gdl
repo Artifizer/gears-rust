@@ -19,7 +19,7 @@ gdl_version = "1.0"
 gear(
     deps = ["types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/bss/rate-provider/rate-provider"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "FX Rate Provider",
     description = "Stateless adapter supplying live foreign-exchange rates via composable source plugins.",

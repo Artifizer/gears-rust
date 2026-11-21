@@ -10,7 +10,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authz-resolver", "credstore"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/github-mirror/github-mirror"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "GitHub Mirror",
     description = "Continuously synchronised local replica of GitHub repository metadata, behind a GitHub-compatible API.",

@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/tenant-resolver/plugins/single-tenant-tr-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Single-Tenant Resolver Plugin",
     description = "Resolves every request to one fixed tenant.",
     category = "core-platform-integration",

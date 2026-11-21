@@ -10,7 +10,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authz-resolver"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/graph-storage/graph-storage"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Graph Storage",
     description = "Typed, multi-tenant knowledge graph with search and traversal over a pluggable store.",
     category = "core-functionality",

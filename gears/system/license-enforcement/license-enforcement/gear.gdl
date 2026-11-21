@@ -10,7 +10,7 @@ gdl_version = "1.0"
 gear(
     deps = ["types-registry", "authz-resolver", "tenant-resolver"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/license-enforcement/license-enforcement"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "License Enforcement",
     description = "Grant store and management API; answers license checks as a license-resolver backend.",

@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = ["resource-group"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/tenant-resolver/plugins/rg-tr-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Resource-Group Tenant Resolver Plugin",
     description = "Derives tenant identity from the resource-group hierarchy. It needs a seeded resource-group, so a fresh deployment uses the static tenant resolver plugin.",
     category = "core-platform-integration",

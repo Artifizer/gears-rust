@@ -15,7 +15,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/authn-resolver/plugins/static-authn-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Static AuthN Plugin",
     description = "Accepts configured tokens and returns a fixed identity. For dev and test.",
     category = "core-platform-integration",

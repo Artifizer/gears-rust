@@ -12,7 +12,7 @@ gdl_version = "1.0"
 gear(
     deps = ["tenant-resolver"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/authz-resolver/plugins/tr-authz-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Tenant-Resolver AuthZ Plugin",
     description = "Authorization over the tenant hierarchy, resolved through Tenant Resolver.",
     category = "core-platform-integration",

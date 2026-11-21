@@ -10,7 +10,7 @@ gdl_version = "1.0"
 gear(
     deps = ["types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/license-resolver/plugins/static-license-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Static License Plugin",
     description = "License grants from static configuration rules, for development and testing.",
     category = "core-platform-integration",

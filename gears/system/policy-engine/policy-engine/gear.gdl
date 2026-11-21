@@ -16,7 +16,7 @@ gear(
         consume(contract = "TypesRegistryApi", rust = "types_registry_sdk::TypesRegistryApi", sdk = TR_SDK),
     ],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/policy-engine/policy-engine"),
-    maturity = "experimental",
+    maturity = "alpha",
     implementation = "in-progress",
     name = "Policy Engine",
     description = "Built-in platform policies and tenant-scoped policy documents, evaluated on the shared evaluation facility as the default admission-control engine.",

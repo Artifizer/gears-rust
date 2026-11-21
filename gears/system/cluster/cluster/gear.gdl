@@ -65,7 +65,7 @@ CLUSTER_CLIENT_SDK = cargo(
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/cluster/cluster"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Cluster Coordination",
     description = "Distributed cache, leader election, and locks with pluggable coordination backends.",
     category = "serverless",

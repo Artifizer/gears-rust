@@ -14,7 +14,7 @@ gear(
     deps = [],
     consumes = [consume(contract = "PlatformTypesRegistryApi", rust = "types_registry_sdk::PlatformTypesRegistryApi", sdk = TR_SDK)],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/tenant-resolver/tenant-resolver"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Tenant Resolver",
     description = "Resolves tenant identity and hierarchy through a selected plugin.",

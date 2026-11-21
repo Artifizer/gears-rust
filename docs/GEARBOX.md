@@ -89,7 +89,7 @@ complete:
 # slice declaring a client trait -- and `one_per_installation`.
 
 gear(
-    maturity = "preview",
+    maturity = "beta",
     name = "Service Discovery",
     description = "Service discovery and gear directory for the runtime: instance registration, tracking, and resolution.",
     category = "core-functionality",

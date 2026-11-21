@@ -16,7 +16,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/authn-resolver/plugins/oidc-authn-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "OIDC AuthN Plugin",
     description = "Validates bearer tokens against an OIDC issuer.",
     category = "core-platform-integration",

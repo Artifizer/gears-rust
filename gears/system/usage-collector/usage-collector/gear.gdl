@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authz-resolver", "types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/usage-collector/usage-collector"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Usage Collector",
     description = "Centralized usage metering with pluggable storage, aggregation, and replay-safe feeds.",

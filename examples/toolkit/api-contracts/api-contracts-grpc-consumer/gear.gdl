@@ -18,7 +18,7 @@ PAYMENT_SDK = cargo(
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "examples/toolkit/api-contracts/api-contracts-grpc-consumer"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Payments gRPC Consumer (example)",
     description = "Calls PaymentApi of another gear over gRPC, found through the directory.",
     category = "example",

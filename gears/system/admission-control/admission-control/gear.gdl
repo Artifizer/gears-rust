@@ -13,7 +13,7 @@ gear(
     deps = [],
     consumes = [consume(contract = "PlatformTypesRegistryApi", rust = "types_registry_sdk::PlatformTypesRegistryApi", sdk = TR_SDK)],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/admission-control/admission-control"),
-    maturity = "experimental",
+    maturity = "alpha",
     implementation = "in-progress",
     name = "Admission Control",
     description = "Admission gate for platform operations, backed by one optional pluggable admission engine.",

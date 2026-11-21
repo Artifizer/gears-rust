@@ -34,6 +34,10 @@ pr_labels = ["release-plz"]
 changelog_update = true
 git_release_enable = true
 
+# A pre-release version (-alpha.N, -beta.N, -rc.N) becomes a GitHub pre-release and is never
+# marked "latest". See docs/adrs/releases/0001-crate-versioning-and-maturity.md.
+git_release_type = "auto"
+
 # We keep a single changelog for the repo. release-plz will update it in the release PR.
 changelog_path = "CHANGELOG.md"
 

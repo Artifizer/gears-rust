@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/types-registry/types-registry"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Types Registry",
     # Pulled in by roughly 22 gears via deps, so it is linked into most

@@ -12,7 +12,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/nodes-registry/nodes-registry"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Nodes Registry",
     description = "Registry of deployed gear nodes and their capabilities for discovery and management.",

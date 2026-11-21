@@ -12,7 +12,7 @@ gear(
     deps = [],
     consumes = [consume(contract = "PlatformTypesRegistryApi", rust = "types_registry_sdk::PlatformTypesRegistryApi", sdk = TR_SDK)],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/authn-resolver/authn-resolver"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Authentication Resolver",
     # Authentication only: authorization is authz-resolver, a gear of its own.
     description = "Authentication primitives with pluggable token validation backends.",

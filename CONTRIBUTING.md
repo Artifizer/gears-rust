@@ -408,19 +408,7 @@ Use the [PR template](./.github/pull_request_template.md) for the description.
 2. **Approvals** as required by the table below
 3. **All conversations resolved** before merge
 4. **Up-to-date with main** branch
-5. **No open CRITICAL or HIGH finding** from the design or code review ([DESIGN_REVIEW.md §3](./guidelines/DESIGN_REVIEW.md#3-severity)). A MEDIUM finding is fixed or tracked in an issue linked from the maturity card
-
-Required approvals depend on the maturity of the affected gear and on what the change touches. When several rows apply, the strictest one wins. A *contributor group* is one organization or team with maintainers in [MAINTAINERS.md](./MAINTAINERS.md); the gear owner is listed in [CODEOWNERS](./.github/CODEOWNERS).
-
-| Change | `unpublished` | `preview` | `stable` |
-|---|---|---|---|
-| Internals, tests, docs, `alpha` features | 1 maintainer | 1 maintainer | 1 maintainer + gear owner |
-| Public contract or persisted data (additive) | 1 maintainer | gear owner + 1 maintainer | gear owner + 1 maintainer from another group, after a design review |
-| Breaking contract change, `beta` feature added or graduated | 1 maintainer | gear owner + 1 maintainer from another group | gear owner + 2 maintainers from other groups, after a design review |
-| Security, tenant isolation, secrets | gear owner + 1 maintainer from another group | gear owner + 1 maintainer from another group | gear owner + 1 maintainer from another group, after a design review |
-| Maturity transition | – | [MATURITY.md §3](./guidelines/MATURITY.md#3-transitions) | [MATURITY.md §3](./guidelines/MATURITY.md#3-transitions) |
-
-ToolKit libraries (`libs/**`) follow the column of their crate version (`0.x` as `preview`, `>= 1.0` as `stable`) and always need a design review for public API changes.
+5. **Maturity rules** of the affected gear are met, including extra approvals for specification and SDK changes: see [MATURITY.md](./guidelines/MATURITY.md)
 
 Merge Strategy:
 
@@ -452,7 +440,7 @@ See [docs/pr-review/README.md](./docs/pr-review/README.md) for full setup (GitHu
 
 ## 3. Versioning
 
-This topic defines how Constructor Fabric Gears versions crates and handles breaking changes.
+This topic defines how Constructor Fabric Gears versions crates and handles breaking changes. A gear's maturity level adds its own rules for breaking changes, migration notes, and unstable features: see [MATURITY.md](./guidelines/MATURITY.md).
 
 ## Scope
 

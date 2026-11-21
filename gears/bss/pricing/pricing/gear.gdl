@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authz-resolver", "types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/bss/pricing/pricing"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Plan & Price Modeling",
     description = "Authoritative catalog for subscription plans, price structures, and billing descriptors.",

@@ -10,7 +10,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/authn-resolver/plugins/firebase-authn-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Firebase AuthN Plugin",
     description = "Verifies Firebase ID tokens and maps configured UIDs to tenant identities.",
     category = "core-platform-integration",

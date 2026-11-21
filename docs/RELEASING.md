@@ -96,6 +96,18 @@ based on that crate's commits.
 Crates that share a version number do so because they are released together in practice,
 not because Cargo enforces it.
 
+### Pre-releases and maturity
+
+A crate's version shows its gear's maturity: `-alpha.N` for `alpha`, plain `0.x` for `beta`,
+`>= 1.0` for `stable`, and `X.0.0-beta.N` / `-rc.N` for a preview of a later major. See
+[ADR: crate versioning and maturity](adrs/releases/0001-crate-versioning-and-maturity.md).
+
+- For a pre-release, release-plz only increments the counter (`0.1.0-alpha.1` → `0.1.0-alpha.2`),
+  whatever the commit type.
+- Adding, changing or dropping a label (`alpha` → `beta` → `rc` → final) is manual: edit the
+  `version` of every crate of the gear in the pull request that changes `gear.gdl`.
+- `git_release_type = "auto"` marks the GitHub Release of a pre-release as a pre-release.
+
 ### Dependency ordering
 
 release-plz publishes crates in the correct order for intra-workspace dependencies.

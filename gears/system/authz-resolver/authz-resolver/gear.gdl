@@ -22,7 +22,7 @@ gear(
     deps = [],
     consumes = [consume(contract = "PlatformTypesRegistryApi", rust = "types_registry_sdk::PlatformTypesRegistryApi", sdk = TR_SDK)],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/authz-resolver/authz-resolver"),
-    maturity = "preview",
+    maturity = "beta",
     name = "AuthZ Resolver",
     description = "Authorization policy evaluation with pluggable decision-point backends.",
     category = "core-platform-integration",

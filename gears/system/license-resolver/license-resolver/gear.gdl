@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = ["types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/license-resolver/license-resolver"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "License Resolver",
     description = "Abstraction layer for license feature checks with caching and metrics collection.",

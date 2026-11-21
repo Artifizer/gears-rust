@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = ["types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/usage-collector/plugins/timescaledb-usage-collector-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "TimescaleDB Usage Collector Plugin",
     description = "TimescaleDB time-series storage backend plugin for production usage collection.",
     category = "core-functionality",

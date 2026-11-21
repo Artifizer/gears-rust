@@ -10,7 +10,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authz-resolver", "types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/quota-enforcement/quota-enforcement"),
-    maturity = "experimental",
+    maturity = "alpha",
     implementation = "in-progress",
     name = "Quota Enforcer",
     description = "Quota enforcement with validation, reservation, and commit/release lifecycle.",

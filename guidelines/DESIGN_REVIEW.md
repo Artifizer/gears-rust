@@ -58,7 +58,7 @@ Report what the change adds, changes, or makes worse. Older debt is out of scope
 
 ### Step 1: Snapshot
 
-Record PR number, base and head SHA, changed artifacts, and prompt version. Record each affected gear's `maturity` from `gear.gdl`, its crate version, and, for a `stable` gear, the stage of each changed feature from the maturity card (`alpha`, `beta`, `ga`). Pick the severity column from these (Section 3). Missing data falls back to the stricter column. Do not read existing review comments until Step 5.
+Record PR number, base and head SHA, changed artifacts, prompt version, and the `maturity` of each affected gear from `gear.gdl`. Do not read existing review comments until Step 5.
 
 ### Step 2: Inventory
 

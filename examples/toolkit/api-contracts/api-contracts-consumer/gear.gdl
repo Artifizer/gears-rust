@@ -19,7 +19,7 @@ PAYMENT_SDK = cargo(
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "examples/toolkit/api-contracts/api-contracts-consumer"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Payments Consumer (example)",
     description = "Resolves PaymentApi from another gear through the client hub.",
     category = "example",

@@ -13,7 +13,7 @@ gdl_version = "1.0"
 gear(
     deps = ["types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/bss/rate-provider/plugins/http-json-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "HTTP-JSON Rate Source Plugin",
     description = "Generic HTTP-JSON feed source plugin for the FX Rate Provider gear.",
     category = "bss",

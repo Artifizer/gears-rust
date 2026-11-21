@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/authz-resolver/plugins/static-authz-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Static AuthZ Plugin",
     description = "Static tenant-scoped authorization policy for development and testing.",
     category = "core-platform-integration",

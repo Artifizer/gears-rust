@@ -18,7 +18,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authn-resolver", "authz-resolver", "oagw", "types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/mini-chat/mini-chat"),
-    maturity = "preview",
+    maturity = "beta",
     name = "MiniChat",
     description = "Multi-tenant AI chat with SSE streaming, attachments and quotas, backed by OpenAI / Azure OpenAI, vLLM or Anthropic (Anthropic Platform, Microsoft Foundry).",
     category = "gen-ai",

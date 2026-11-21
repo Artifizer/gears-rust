@@ -12,7 +12,7 @@ gdl_version = "1.0"
 gear(
     deps = [],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/account-management/plugins/static-idp-plugin"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Static IdP Plugin",
     description = "Permissive echo identity provider for Account Management development and end-to-end stacks.",
     category = "oss",

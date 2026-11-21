@@ -18,7 +18,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authn-resolver", "grpc-hub"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/api-gateway"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "API Gateway",
     description = "Single public API entrypoint with routing, auth, rate limiting, and OpenAPI publication.",

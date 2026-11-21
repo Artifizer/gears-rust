@@ -17,7 +17,7 @@ gear(
     # REST with the platform token otherwise.
     consumes = [consume(contract = "AuthZResolverApi", rust = "authz_resolver_sdk::AuthZResolverApi", sdk = AUTHZ_SDK)],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/credstore/credstore"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Credentials Store",
     description = "Secure per-tenant secret storage with pluggable backends and hierarchical sharing.",

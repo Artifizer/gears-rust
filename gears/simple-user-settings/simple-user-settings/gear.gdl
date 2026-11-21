@@ -10,7 +10,7 @@ gdl_version = "1.0"
 gear(
     deps = ["authz-resolver"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/simple-user-settings/simple-user-settings"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Simple User Settings",
     description = "Lightweight per-user settings storage with CRUD API and schema validation.",
     category = "serverless",

@@ -12,7 +12,7 @@ gdl_version = "1.0"
 gear(
     deps = ["types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/mini-chat/mini-chat/src/infra/plugins/static_model_policy"),
-    maturity = "preview",
+    maturity = "beta",
     name = "Static Model Policy Plugin",
     description = "Static model policy plugin providing fixed model selection for MiniChat deployments.",
     category = "gen-ai",

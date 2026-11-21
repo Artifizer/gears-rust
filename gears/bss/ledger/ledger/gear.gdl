@@ -11,7 +11,7 @@ gdl_version = "1.0"
 gear(
     deps = ["account-management", "authz-resolver", "tenant-resolver", "types-registry"],
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/bss/ledger/ledger"),
-    maturity = "preview",
+    maturity = "beta",
     implementation = "in-progress",
     name = "Billing Ledger",
     description = "Append-only double-entry subledger for financially material movements and balances.",
