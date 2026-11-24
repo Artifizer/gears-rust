@@ -150,3 +150,15 @@ use event_broker as _;
 use sqlite_event_broker_plugin as _;
 #[cfg(feature = "bss-orders")]
 use standalone_cluster_plugin as _;
+
+#[cfg(feature = "prompt-scanner-example")]
+use prompt_scanner as _;
+
+#[cfg(feature = "prompt-scanner-example")]
+use always_allow_plugin as _;
+
+#[cfg(feature = "prompt-scanner-example")]
+use regex_scanner as _;
+
+#[cfg(feature = "prompt-scanner-example")]
+use onnx_scanner as _;

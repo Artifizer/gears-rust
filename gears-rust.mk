@@ -512,7 +512,7 @@ test-eb-kafka: install-tools
 
 TOOLKIT_DB_LANES := toolkit-db-sqlite toolkit-db-pg toolkit-db-pgq toolkit-db-mysql
 INTEGRATION_LANES := $(TOOLKIT_DB_LANES) users-info-pg usage-collector-pg usage-collector-ch \
-	types-registry-db oagw-db oagw-cluster cluster-pg cluster-redis rg-pg settings-service-pg credstore-pg construct-pg \
+	types-registry-db oagw-db oagw-cluster cluster-pg cluster-redis rg-pg settings-service-pg credstore-pg construct-pg prompt-scanner-pg \
 	pricing-pg coord-pg products-pg ledger-pg orders-pg eb-gear-db quota-enforcement-pg license-enforcement-pg model-registry-pg
 
 ## toolkit-db on SQLite; the examples must still build after the tests.
@@ -660,6 +660,11 @@ lane_env_model-registry-pg = MODEL_REGISTRY_PG_REQUIRE_DOCKER=1
 ## with `docker rm -fv` to start clean): the row locks, lock order and snapshot
 ## reads that SQLite does not exercise.
 lane_args_license-enforcement-pg = -p cf-gears-license-enforcement --features integration --lib
+
+## prompt-scanner's PostgreSQL tier (Docker required; testcontainers): runs the
+## evidence migration and the repository against PostgreSQL, which the default
+## SQLite-backed suite cannot cover (CHECK lists, batch LIMIT subqueries).
+lane_args_prompt-scanner-pg = -p cf-gears-prompt-scanner --features integration --test pg_migrations_test
 
 ## bss-pricing's Postgres tier (Docker required; each suite spins up its own
 ## postgres container via testcontainers).
@@ -1387,7 +1392,7 @@ help.RELEASE.text = Build an optimized (release) image instead of a dev build.
 
 # -------- Main targets --------
 
-.PHONY: all dist check gear-ci ci_test ci_docs build build-debug .cargo-build .split-debug quickstart example run full-make-matrix
+.PHONY: all dist check gear-ci ci_test ci_docs build build-debug .cargo-build .split-debug quickstart example run full-make-matrix genai-security genai-security-setup onnx-models-fetch onnxruntime-fetch
 
 # Start server with quickstart config
 quickstart:
@@ -1398,6 +1403,31 @@ quickstart:
 example:
 	$(call print_target_banner)
 	$(MAKE) run GEAR=
+
+## Fetch the pinned ONNX model artifacts that config/genai-security.yaml's
+## onnx-scanner backend needs — run once before 'make genai-security' if
+## gears/prompt-scanner/plugins/onnx-scanner/models/ is empty.
+genai-security-setup: onnx-models-fetch onnxruntime-fetch
+
+## Download onnx-scanner's model artifacts by pinned revision, with sha256
+## verification (see gears/prompt-scanner/plugins/onnx-scanner/docs/runtime/DESIGN.md's "Model provisioning"
+## decision — dev/CI/testing convenience only).
+onnx-models-fetch:
+	bash gears/prompt-scanner/plugins/onnx-scanner/scripts/fetch-models.sh
+
+## Download the ONNX Runtime shared library that file-parser (magika feature)
+## and onnx-scanner both dlopen at run time. Required because the workspace pins
+## `ort` with `load-dynamic`; without it `ort` 2.0.0-rc.12 hangs instead of
+## erroring. Same script CI uses, so the pinned version cannot drift.
+onnxruntime-fetch:
+	bash scripts/fetch-onnxruntime.sh
+
+## Run the GenAI Security pipeline: prompt-scanner + its
+## scanner backend plugins (all one process, config/genai-security.yaml),
+## no Python dependencies. Ctrl+C tears it down. Run 'make genai-security-setup'
+## once first to fetch onnx-scanner's model.
+genai-security:
+	./scripts/run-genai-security.sh
 
 # Server presets for `make run PRESET=<preset>`: Cargo features, config file
 # (default config/quickstart.yaml) and an optional command run before the server.
