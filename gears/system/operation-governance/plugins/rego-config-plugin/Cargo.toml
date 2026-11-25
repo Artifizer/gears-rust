@@ -1,0 +1,38 @@
+[package]
+name = "cf-gears-og-rego-config-plugin"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Operation Governance plugin that loads Rego policies from its configuration file"
+keywords = ["constructorfabric", "cf-gears", "governance", "rego"]
+
+[lib]
+name = "og_rego_config_plugin"
+
+[lints]
+workspace = true
+
+[dependencies]
+operation-governance-sdk = { workspace = true }
+types-registry-sdk = { workspace = true }
+types-registry = { workspace = true }
+
+toolkit = { workspace = true }
+toolkit-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-policy-evaluation = { workspace = true }
+
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+uuid = { workspace = true }

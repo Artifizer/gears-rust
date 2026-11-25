@@ -1,0 +1,6 @@
+{
+  "id": "gts.cf.toolkit.authz.permission.v1~cf.approval_service._.opportunity_read.v1",
+  "resource_type": "gts.cf.core.approval.opportunity.v1~",
+  "action": "read",
+  "display_name": "Browse approval opportunities"
+}

@@ -1,6 +1,11 @@
 [[ignore]]
+<<<<<<< HEAD
 reason = "Ignore API key while its exploratory proposal is the only documentation; register it after PRD and DESIGN are added."
 patterns = ["gears/api-key/*"]
+=======
+reason = "Approval Service policy examples supplement the SDLC artifacts."
+patterns = ["gears/approval-service/docs/POLICIES_EXAMPLES.md"]
+>>>>>>> fe3b3a9c6 ([wip]: operation-governance PR, do not merge)
 
 [[ignore]]
 reason = "Ignore graph-storage research companions for ADR-0001 (graph-engine evaluation, PG19 SQL/PGQ spike report) — evidence documents, not Constructor Studio SDLC artifacts."
@@ -111,6 +116,10 @@ patterns = [
 ]
 
 [[ignore]]
+reason = "Ignore module 'operation-governance' (its PRD/DESIGN/ADRs live in docs/arch/operation-governance, validated there)."
+patterns = ["gears/system/operation-governance/*"]
+
+[[ignore]]
 reason = "Ignore module 'tenant-resolver' (not SDLC-documented yet: missing required PRD/DESIGN)."
 patterns = ["gears/system/tenant-resolver/*"]
 
@@ -172,10 +181,6 @@ reason = "Ignore module 'mini-chat' docs (temporary: PRD/DESIGN constraints fail
 patterns = ["gears/mini-chat/*"]
 
 [[ignore]]
-reason = "Ignore module 'approval-service' (PRD/DESIGN are placeholders). Remove this ignore after PRD/DESIGN conform to template."
-patterns = ["gears/approval-service/*"]
-
-[[ignore]]
 reason = "Ignore module 'contracts' (PRD is a placeholder: sections 7-12 are TBD, including the Non-Functional Requirements the template requires at least one id under, and no DESIGN exists yet). Remove this ignore after PRD/DESIGN conform to template."
 patterns = ["gears/bss/contracts/*"]
 
@@ -187,6 +192,32 @@ patterns = ["gears/bss/*/docs/design/*"]
 name = "cf-gears"
 slug = "cf"
 kit = "gears"
+
+# Shared architecture topics carry ADRs alongside supporting material.
+[[systems.autodetect]]
+kit = "gears"
+system_root = "{project_root}/docs/arch"
+artifacts_root = "{system_root}"
+
+[systems.autodetect.artifacts.PRD]
+pattern = "operation-governance/PRD.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.artifacts.DESIGN]
+pattern = "operation-governance/DESIGN.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.artifacts.ADR]
+pattern = "*/ADR/*.md"
+traceability = "DOCS-ONLY"
+required = false
+
+[systems.autodetect.validation]
+require_kind_registered_in_kit = true
+require_md_extension = true
+fail_on_unmatched_markdown = false
 
 [[systems.autodetect]]
 kit = "gears"

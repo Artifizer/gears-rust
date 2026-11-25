@@ -1,0 +1,97 @@
+{
+  "$id": "gts://gts.cf.core.approval.opportunity.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Approval Opportunity base type (extension point). Abstract: every gear operation that may require approval is a type DERIVED from this base and owned by the gear that registers it, for example gts.cf.core.approval.opportunity.v1~cf.procurement._.po_release.v1~ (PRD cpt-cf-approval-service-fr-register-req-type). An instance of an opportunity type is the context-attribute document a gear sends on a verification call: its 'context' is validated against the Facts of the Governed Operation type the opportunity names (PRD cpt-cf-approval-service-fr-context-attributes). Behaviour is declared in traits, not in code: accepted projection and subject types, decision authority, standing approval setting, and the mandatory default action. The Approval Service rejects a registration whose effective traits miss 'default_action' or 'standing_approvals' (no defaults are defined for them on purpose). The opportunity type identifier is also the PDP resource type for the check, request, approve, and administer permissions and the subject type of request events (DESIGN cpt-cf-approval-service-entity-opportunity).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "context": {
+      "description": "Context attributes of one verification call. Derived types do not narrow this object: the Approval Service validates it against the 'facts' schema of the Governed Operation type named by the 'governed_operation' trait, whose per-Fact traits (tier, approver_visible, sensitive, binding) also apply here (Operation Governance ADR 0002). Attributes MUST NOT carry secrets or payment card data; the Approval Service rejects declarations marked 'writeOnly' or with 'format: password' (PRD cpt-cf-approval-service-nfr-data-classification).",
+      "type": "object",
+      "additionalProperties": true,
+      "default": {}
+    }
+  },
+  "x-gts-traits-schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "governed_operation": {
+        "description": "Mandatory: the Governed Operation family (a type ID derived from gts.cf.core.admission_control.governed_operation.v1~, without its version) whose current version's Facts are this opportunity's context attributes. It MUST be owned by the same gear, and at most one opportunity may name a family. No default value: a registration without it is rejected.",
+        "type": "string",
+        "x-gts-pattern-ref": "gts.cf.core.admission_control.governed_operation.v1~"
+      },
+      "display_name": {
+        "description": "Human-readable opportunity name for administrator browsing and approver inboxes, for example 'Release purchase order'. Defaults to the schema description when absent.",
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "default_action": {
+        "description": "Mandatory gear-default rule action: the lowest rule layer, matching every projection type the opportunity accepts (PRD cpt-cf-approval-service-fr-rule-layers). No default value: a registration without it is rejected. Enum evolution: adding an action is a breaking change of this base type (new major).",
+        "type": "string",
+        "enum": [
+          "deny",
+          "require_approval",
+          "not_required"
+        ]
+      },
+      "standing_approvals": {
+        "description": "Mandatory setting: whether an approve decision recorded without referencing a request may apply ('allowed') or not ('prohibited'). No default value: a registration without it is rejected. Changing it to 'prohibited' makes existing standing approvals stop applying at the next verification (PRD cpt-cf-approval-service-fr-register-req-type).",
+        "type": "string",
+        "enum": [
+          "allowed",
+          "prohibited"
+        ]
+      },
+      "decision_authority": {
+        "description": "Where approve decisions may be recorded: 'subject_tenant' (default; the subject tenant or its ancestors) or 'resource_tenant' (owner-only; the resource tenant or its ancestors, and only when the resource tenant is on the subject tenant's ancestor path). Deny decisions stay possible at the subject tenant or its ancestors in both modes (PRD cpt-cf-approval-service-fr-submit-decision).",
+        "type": "string",
+        "enum": [
+          "subject_tenant",
+          "resource_tenant"
+        ],
+        "default": "subject_tenant"
+      },
+      "accepted_projection_types": {
+        "description": "GTS type identifiers or patterns of the resource projection types the opportunity accepts. Each MUST resolve under gts.cf.core.approval.projection.v1~. A verification with any other projection type returns 'invalid'.",
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 64,
+        "items": {
+          "type": "string",
+          "x-gts-pattern-ref": "gts.cf.core.approval.projection.v1~"
+        }
+      },
+      "resource_projections": {
+        "description": "Mandatory: for each resource type of the Governed Operation, the projection type the Approval Stage uses when it builds a verification from a Governance Check. Keys are resource type GTS identifiers; values MUST be among 'accepted_projection_types'. A check whose resource type has no entry returns 'invalid'.",
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 64,
+        "additionalProperties": {
+          "type": "string",
+          "x-gts-pattern-ref": "gts.cf.core.approval.projection.v1~"
+        }
+      },
+      "accepted_subject_types": {
+        "description": "GTS type identifiers or patterns of the subject types the opportunity accepts, for example a platform user type or a tenant type. A verification with any other subject type returns 'invalid' (PRD cpt-cf-approval-service-fr-subject).",
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 64,
+        "items": {
+          "type": "string",
+          "x-gts-pattern-ref": "gts.*"
+        }
+      }
+    },
+    "required": [
+      "governed_operation",
+      "default_action",
+      "standing_approvals",
+      "accepted_projection_types",
+      "accepted_subject_types",
+      "resource_projections"
+    ]
+  },
+  "x-gts-abstract": true
+}

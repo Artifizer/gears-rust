@@ -5,17 +5,32 @@ date: 2026-06-02
 
 # Discovery-Driven Consumer Wiring via `#[toolkit::consumes]`
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Macro shape](#macro-shape)
+  - [What the macro generates](#what-the-macro-generates)
+  - [Runtime integration — proxy-wiring phase (`runtime/host_runtime.rs`)](#runtime-integration--proxy-wiring-phase-runtimehost_runtimers)
+  - [Runtime integration — embedded profile (Profile 1)](#runtime-integration--embedded-profile-profile-1)
+  - [Consumer wiring: endpoint override + client tuning](#consumer-wiring-endpoint-override--client-tuning)
+  - [Readiness response shape](#readiness-response-shape)
+  - [Known limitation: "resolved" is not "conformant"](#known-limitation-resolved-is-not-conformant)
+  - [Relationship to the provides macro](#relationship-to-toolkitprovides)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Convention-Based Auto-Wiring](#option-a-convention-based-auto-wiring)
+  - [Option B: Explicit consumes macro (chosen)](#option-b-toolkitconsumes-explicit-macro-chosen)
+  - [Option C: Static `ClientWiring::Rest { endpoint }` as Primary Path](#option-c-static-clientwiringrest--endpoint--as-primary-path)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-binding-adr-consumer-wiring`
-
-## Table of Contents
-
-1. [Context and Problem Statement](#context-and-problem-statement)
-2. [Decision Drivers](#decision-drivers)
-3. [Considered Options](#considered-options)
-4. [Decision Outcome](#decision-outcome)
-5. [Pros and Cons of the Options](#pros-and-cons-of-the-options)
-6. [More Information](#more-information)
-
 ## Context and Problem Statement
 
 ADR-0001 defines how a gear *provides* a contract to its consumers via `#[toolkit::provides]`. There

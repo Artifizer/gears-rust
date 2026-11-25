@@ -5,6 +5,24 @@ date: 2026-08-19
 
 # Close the Error-Middleware Catch-All Gap with Wrapper Extractors and a Generic Fallback
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Wrapper Extractors + Generic Fallback](#option-a-wrapper-extractors--generic-fallback)
+  - [Option B: Generic Fallback Only](#option-b-generic-fallback-only)
+  - [Option C: Wrapper Extractors Only](#option-c-wrapper-extractors-only)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-errors-adr-error-middleware-catchall`
 
 ## Context and Problem Statement

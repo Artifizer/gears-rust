@@ -1,0 +1,19 @@
+error[E0053]: method `owner_count` has an incompatible type for trait
+  --> tests/ui/fail_wrong_value_type.rs:27:1
+   |
+27 | #[operation_governance_sdk::typed::async_trait]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u64`, found `std::string::String`
+   |
+note: type in trait
+  --> tests/ui/fail_wrong_value_type.rs:11:19
+   |
+11 | #[derive(Default, GovernedFacts)]
+   |                   ^^^^^^^^^^^^^
+   = note: expected signature `fn(&'life0 Provider) -> Pin<Box<(dyn Future<Output = Result<u64, FactUnavailable>> + Send + 'async_trait)>>`
+              found signature `fn(&'life0 Provider) -> Pin<Box<(dyn Future<Output = Result<std::string::String, FactUnavailable>> + Send + 'async_trait)>>`
+   = note: this error originates in the attribute macro `operation_governance_sdk::typed::async_trait` which comes from the expansion of the attribute macro `::operation_governance_sdk::typed::async_trait` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: change the output type to match the trait
+   |
+27 - #[operation_governance_sdk::typed::async_trait]
+27 + Pin<Box<(dyn Future<Output = Result<u64, FactUnavailable>> + Send + 'async_trait)>>
+   |

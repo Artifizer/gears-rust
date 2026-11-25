@@ -5,17 +5,31 @@ date: 2026-08-11
 
 # gRPC Transport Projection via `#[toolkit::grpc_contract]`
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Macro shape](#macro-shape)
+  - [`.proto` generation and the lock file](#proto-generation-and-the-lock-file)
+  - [DTO ↔ proto bridging, and the panic rule](#dto--proto-bridging-and-the-panic-rule)
+  - [Idempotency and retry](#idempotency-and-retry)
+  - [Streaming scope](#streaming-scope)
+  - [Coexistence with REST](#coexistence-with-rest)
+  - [Known asymmetries with the REST projection](#known-asymmetries-with-the-rest-projection)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Proto-First](#option-a-proto-first)
+  - [Option B: Code-First with a Committed `.proto` (chosen)](#option-b-code-first-with-a-committed-proto-chosen)
+  - [Option C: Code-First with No `.proto`](#option-c-code-first-with-no-proto)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-binding-adr-grpc-projection`
-
-## Table of Contents
-
-1. [Context and Problem Statement](#context-and-problem-statement)
-2. [Decision Drivers](#decision-drivers)
-3. [Considered Options](#considered-options)
-4. [Decision Outcome](#decision-outcome)
-5. [Pros and Cons of the Options](#pros-and-cons-of-the-options)
-6. [More Information](#more-information)
-
 ## Context and Problem Statement
 
 ADR-0001 establishes the base trait as the contract's source of truth and REST as

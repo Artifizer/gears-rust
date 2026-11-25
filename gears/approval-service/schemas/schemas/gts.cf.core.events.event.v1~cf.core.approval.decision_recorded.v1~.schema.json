@@ -1,0 +1,155 @@
+{
+  "$id": "gts://gts.cf.core.events.event.v1~cf.core.approval.decision_recorded.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Change event 'decision_recorded'. Published when an approve or deny decision becomes active, including when it supersedes the same approver's previous decision and for every item of a bulk decision (PRD cpt-cf-approval-service-fr-submit-decision, cpt-cf-approval-service-fr-bulk-approve, cpt-cf-approval-service-upreq-status-changed-event). Consumers use it to invalidate cached verdicts. Recorded durably in the decision's transaction and delivered at least once after commit. Derived from the Event Broker base event type; routed to the approval_events topic and partitioned by subject for per-entity ordering.",
+  "x-gts-traits": {
+    "topic": "gts.cf.core.events.topic.v1~cf.core.approval.approval_events.v1",
+    "partition_key": "/subject",
+    "allowed_subject_types": [
+      "gts.cf.core.approval.decision.v1~"
+    ]
+  },
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "gts://gts.cf.core.events.event.v1~"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "gts.cf.core.events.event.v1~cf.core.approval.decision_recorded.v1~",
+          "$comment": "Pins the event-type identifier so an editor can validate a payload against this schema alone."
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "decision_id": {
+              "description": "The decision (also the event subject).",
+              "type": "string",
+              "format": "uuid"
+            },
+            "opportunity_type": {
+              "type": "string",
+              "x-gts-type-ref": "gts.cf.core.approval.opportunity.v1~"
+            },
+            "projection": {
+              "description": "Projection identity.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "projection_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "projection_type": {
+                  "type": "string",
+                  "x-gts-type-ref": "gts.cf.core.approval.projection.v1~"
+                },
+                "resource_tenant_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "resource_id": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "projection_type",
+                "resource_tenant_id",
+                "resource_id",
+                "version"
+              ]
+            },
+            "subject": {
+              "description": "Subject identifiers.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "subject_type": {
+                  "type": "string",
+                  "x-gts-type-ref": "gts.*"
+                },
+                "subject_tenant_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "subject_id": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "subject_type",
+                "subject_tenant_id",
+                "subject_id"
+              ]
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "approve",
+                "deny"
+              ]
+            },
+            "verdict_version": {
+              "description": "Monotonic version of the committed change (the change sequence). Verdicts computed after this change carry a version greater than or equal to it.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "dedup_key": {
+              "description": "Deterministic deduplication key (UUIDv5 over change sequence, event type, entity, and target tenant). Delivery is at least once; consumers deduplicate by this key (PRD cpt-cf-approval-service-fr-event-notifications).",
+              "type": "string",
+              "format": "uuid"
+            },
+            "scope_tenant_id": {
+              "description": "Scope tenant of the change.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "changed_by": {
+              "description": "Authenticated identity whose call caused the change. Absent when the service caused it (reconciliation, expiry sweep).",
+              "type": "string",
+              "maxLength": 256
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "supersedes_id": {
+              "description": "The same approver's previous decision, now superseded.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "recorded_by": {
+              "description": "Gear service identity for on-behalf decisions (p2).",
+              "type": "string",
+              "maxLength": 256
+            },
+            "bulk_operation_id": {
+              "description": "Bulk operation the decision belongs to; each bulk item publishes its own event (PRD cpt-cf-approval-service-fr-bulk-approve).",
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "decision_id",
+            "opportunity_type",
+            "projection",
+            "subject",
+            "action",
+            "scope_tenant_id",
+            "verdict_version",
+            "dedup_key"
+          ]
+        }
+      }
+    }
+  ]
+}

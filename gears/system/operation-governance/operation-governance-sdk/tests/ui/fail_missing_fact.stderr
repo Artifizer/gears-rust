@@ -1,0 +1,8 @@
+error[E0046]: not all trait items implemented, missing: `owner_count`
+  --> tests/ui/fail_missing_fact.rs:28:1
+   |
+11 | #[derive(Default, GovernedFacts)]
+   |                   ------------- `owner_count` from trait
+...
+28 | impl CreateWidgetV1Facts for Provider {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `owner_count` in implementation

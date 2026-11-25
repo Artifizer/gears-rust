@@ -1,0 +1,48 @@
+[package]
+name = "cf-gears-operation-governance-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Operation Governance SDK: Governed Operation types, Fact providers, the Governance Enforcer, and the governance plugin contract"
+keywords = ["constructorfabric", "cf-gears", "governance"]
+
+[lib]
+name = "operation_governance_sdk"
+
+[lints]
+workspace = true
+
+[features]
+# Fake plugin and Fact provider conformance helpers for gear tests.
+test-support = []
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+jsonschema = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+# `#[derive(GovernedFacts)]`, re-exported.
+operation-governance-macros = { package = "cf-gears-operation-governance-macros", version = "0.1.0", path = "../operation-governance-macros" }
+tracing = { workspace = true }
+
+# GTS types
+gts = { workspace = true }
+toolkit-gts = { workspace = true }
+
+# ToolKit
+toolkit = { workspace = true }
+toolkit-security = { workspace = true }
+types-registry-sdk = { workspace = true }
+
+[dev-dependencies]
+trybuild = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }

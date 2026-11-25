@@ -1,0 +1,6 @@
+{
+  "id": "gts.cf.toolkit.authz.permission.v1~cf.approval_service._.governance_read.v1",
+  "resource_type": "gts.cf.core.approval.opportunity.v1~",
+  "action": "read_governance",
+  "display_name": "Read approval rules, policies, auto-approval rules, verdict explanations, and access review reports"
+}

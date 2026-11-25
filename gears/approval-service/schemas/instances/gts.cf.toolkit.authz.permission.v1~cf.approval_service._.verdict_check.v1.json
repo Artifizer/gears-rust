@@ -1,0 +1,6 @@
+{
+  "id": "gts.cf.toolkit.authz.permission.v1~cf.approval_service._.verdict_check.v1",
+  "resource_type": "gts.cf.core.approval.opportunity.v1~",
+  "action": "check",
+  "display_name": "Ask for an approval verdict on an opportunity"
+}

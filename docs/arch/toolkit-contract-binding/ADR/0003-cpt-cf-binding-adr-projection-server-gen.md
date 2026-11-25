@@ -5,17 +5,32 @@ date: 2026-06-02
 
 # Extend Projection Traits to Generate Server Routes and Enforce Base-Projection Parity
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [1. Compile-time base-projection parity check](#1-compile-time-base-projection-parity-check)
+  - [Parity: what is enforced, and when](#parity-what-is-enforced-and-when)
+  - [Reshaping and aggregation live above the projection](#reshaping-and-aggregation-live-above-the-projection)
+  - [2. Server-side `register_<name>_routes()` generation](#2-server-side-register_name_routes-generation)
+  - [Before / After](#before--after)
+  - [Metadata resolution for generated `OperationBuilder` calls](#metadata-resolution-for-generated-operationbuilder-calls)
+  - [gRPC projection — unchanged, still additive](#grpc-projection--unchanged-still-additive)
+  - [Consequences](#consequences)
+  - [Implementation status (PoC)](#implementation-status-poc)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Extended Projection Macro (chosen)](#option-a-extended-projection-macro-chosen)
+  - [Option B: Collapse Annotations onto Base Trait](#option-b-collapse-annotations-onto-base-trait)
+  - [Option C: Retain Projection Traits + CI OpenAPI Diff](#option-c-retain-projection-traits--ci-openapi-diff)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-binding-adr-projection-server-gen`
-
-## Table of Contents
-
-1. [Context and Problem Statement](#context-and-problem-statement)
-2. [Decision Drivers](#decision-drivers)
-3. [Considered Options](#considered-options)
-4. [Decision Outcome](#decision-outcome)
-5. [Pros and Cons of the Options](#pros-and-cons-of-the-options)
-6. [More Information](#more-information)
-
 ## Context and Problem Statement
 
 ADR-0001 introduced a two-layer architecture: a clean **base trait** (zero transport annotations)

@@ -6,6 +6,32 @@ decision-makers: Constructor Fabric steering committee
 
 # ADR-0001: Safe CTE Support in the Secure ORM
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [API shape](#api-shape)
+  - [Referencing a CTE](#referencing-a-cte)
+  - [CTE name](#cte-name)
+  - [Same-scope constraint](#same-scope-constraint)
+  - [Feasibility constraint (must be honored by the implementation)](#feasibility-constraint-must-be-honored-by-the-implementation)
+  - [Levels of strictness](#levels-of-strictness)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Recursive CTE (`WITH RECURSIVE`)](#recursive-cte-with-recursive)
+  - [Closure tables: still preferred for hot hierarchies, no longer required](#closure-tables-still-preferred-for-hot-hierarchies-no-longer-required)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: `SecureCte` from `SecureSelect<E, Scoped>`](#option-a-securecte-from-secureselecte-scoped)
+  - [Option B: Escape-hatch with mandatory `scope_via_exists`](#option-b-escape-hatch-with-mandatory-scope_via_exists)
+  - [Option C: Raw `WITH` from a string](#option-c-raw-with-from-a-string)
+  - [Option D: `WITH RECURSIVE` for hierarchies](#option-d-with-recursive-for-hierarchies)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-adr-secure-cte-policy`
 
 ## Context and Problem Statement

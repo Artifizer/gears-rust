@@ -1,0 +1,28 @@
+error: Fact `name` must declare its tier: #[fact(request)], #[fact(computed)], or #[fact(costly)]
+  --> tests/ui/fail_missing_tier.rs:14:9
+   |
+14 |     pub name: String,
+   |         ^^^^
+
+warning: unused import: `FactValue`
+ --> tests/ui/fail_missing_tier.rs:1:32
+  |
+1 | use operation_governance_sdk::{FactValue, GovernedFacts, GovernedOperationV1};
+  |                                ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no associated function or constant named `og_traits` found for struct `CreateWidgetV1` in the current scope
+  --> tests/ui/fail_missing_tier.rs:10:30
+   |
+10 |     traits = CreateWidgetV1::og_traits()
+   |                              ^^^^^^^^^ associated function or constant not found in `CreateWidgetV1`
+...
+13 | pub struct CreateWidgetV1 {
+   | ------------------------- associated function or constant `og_traits` not found for this struct
+   |
+help: there is an associated function `gts_traits` with a similar name
+   |
+10 -     traits = CreateWidgetV1::og_traits()
+10 +     traits = CreateWidgetV1::gts_traits()
+   |

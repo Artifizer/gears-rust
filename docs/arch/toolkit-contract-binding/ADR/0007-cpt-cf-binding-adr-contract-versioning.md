@@ -5,17 +5,30 @@ date: 2026-08-06
 
 # Evolve Contracts Additively Within a Major Version; Use Parallel Traits for Breaking Changes
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [1. Additive-by-default — the normal path](#1-additive-by-default--the-normal-path)
+  - [2. Breaking change → a parallel trait pair](#2-breaking-change--a-parallel-trait-pair)
+  - [Version spelling: a trailing `V<N>` on the trait name](#version-spelling-a-trailing-vn-on-the-trait-name)
+  - [3. `version` and `base_path` must agree](#3-version-and-base_path-must-agree)
+  - [4. Deprecation and sunset](#4-deprecation-and-sunset)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Additive-by-default + Parallel Traits (chosen)](#option-a-additive-by-default--parallel-traits-chosen)
+  - [Option B: Trait Inheritance (`V2: V1`)](#option-b-trait-inheritance-v2-v1)
+  - [Option C: Separate SDK Crate per Major](#option-c-separate-sdk-crate-per-major)
+  - [Option D: Date/Header-Based Versioning (Stripe-style)](#option-d-dateheader-based-versioning-stripe-style)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-binding-adr-contract-versioning`
-
-## Table of Contents
-
-1. [Context and Problem Statement](#context-and-problem-statement)
-2. [Decision Drivers](#decision-drivers)
-3. [Considered Options](#considered-options)
-4. [Decision Outcome](#decision-outcome)
-5. [Pros and Cons of the Options](#pros-and-cons-of-the-options)
-6. [More Information](#more-information)
-
 ## Context and Problem Statement
 
 DESIGN §7 (*Versioning and v1/v2 Coexistence*) covers non-breaking evolution

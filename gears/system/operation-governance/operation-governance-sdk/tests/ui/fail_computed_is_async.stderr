@@ -1,0 +1,11 @@
+error[E0195]: lifetime parameters or bounds on associated function `name` do not match the trait declaration
+  --> tests/ui/fail_computed_is_async.rs:34:14
+   |
+14 |     pub name: String,
+   |             - lifetimes in impl do not match this associated function in trait
+...
+27 | #[operation_governance_sdk::typed::async_trait]
+   | ----------------------------------------------- this `where` clause might not match the one in the trait
+...
+34 |     async fn name(input: &Input) -> FactValue<String> {
+   |              ^^^^^^^^^^^^^^^^^^^ lifetimes do not match associated function in trait

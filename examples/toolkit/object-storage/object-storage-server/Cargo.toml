@@ -1,0 +1,41 @@
+[package]
+name = "object-storage-server"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Standalone server for the object-storage example gear, governed by Rego policies from config"
+
+[[bin]]
+name = "object-storage-server"
+
+[lints]
+workspace = true
+
+[dependencies]
+toolkit = { workspace = true, features = ["bootstrap"] }
+
+# System gears
+api_gateway = { package = "cf-gears-api-gateway", path = "../../../../gears/system/api-gateway" }
+grpc_hub = { package = "cf-gears-grpc-hub", path = "../../../../gears/system/grpc-hub" }
+types_registry = { package = "cf-gears-types-registry", path = "../../../../gears/system/types-registry/types-registry" }
+authn-resolver = { package = "cf-gears-authn-resolver", path = "../../../../gears/system/authn-resolver/authn-resolver" }
+authz-resolver = { package = "cf-gears-authz-resolver", path = "../../../../gears/system/authz-resolver/authz-resolver" }
+tenant-resolver = { package = "cf-gears-tenant-resolver", path = "../../../../gears/system/tenant-resolver/tenant-resolver" }
+
+# Static plugins for standalone operation
+static-authn-plugin = { package = "cf-gears-static-authn-plugin", path = "../../../../gears/system/authn-resolver/plugins/static-authn-plugin" }
+static-authz-plugin = { package = "cf-gears-static-authz-plugin", path = "../../../../gears/system/authz-resolver/plugins/static-authz-plugin" }
+single-tenant-tr-plugin = { package = "cf-gears-single-tenant-tr-plugin", path = "../../../../gears/system/tenant-resolver/plugins/single-tenant-tr-plugin" }
+
+# Operation Governance backend: Rego policies from the config file
+og-rego-config-plugin = { package = "cf-gears-og-rego-config-plugin", path = "../../../../gears/system/operation-governance/plugins/rego-config-plugin" }
+
+# Target gear
+object-storage = { path = "../object-storage" }
+
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }

@@ -1,0 +1,113 @@
+{
+  "$id": "gts://gts.cf.core.approval.rule.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Approval Rule entity: a firewall-style statement that maps an opportunity pattern and a resource selector to an action (PRD cpt-cf-approval-service-fr-approval-rules). Rules come from three layers (PRD cpt-cf-approval-service-fr-rule-layers): 'runtime' rules stored by the service (any tenant), 'configuration' rules from the approval service configuration file (root tenant only, read-only through the API), and 'gear_default' rules derived from each opportunity's default_action trait (root tenant only, read-only). Layers are read at verification time and never copied into one another. This type is the subject type of rule change events (DESIGN cpt-cf-approval-service-entity-rule).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "Rule identifier. UUID for runtime rules; a stable synthetic identifier for configuration and gear-default rules.",
+      "type": "string",
+      "maxLength": 512
+    },
+    "layer": {
+      "description": "Rule layer. Enum evolution: closed by the PRD; a new layer requires a new major.",
+      "type": "string",
+      "enum": [
+        "runtime",
+        "configuration",
+        "gear_default"
+      ]
+    },
+    "scope_tenant_id": {
+      "description": "Tenant the rule applies to, together with its descendants.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "opportunity_pattern": {
+      "description": "GTS type identifier or wildcard pattern over opportunity types, with GTS wildcard and version-matching semantics, for example gts.cf.core.approval.opportunity.v1~cf.procurement.*.",
+      "type": "string",
+      "maxLength": 1024,
+      "x-gts-pattern-ref": "gts.cf.core.approval.opportunity.v1~"
+    },
+    "resource_selector": {
+      "$ref": "#/definitions/ResourceSelector"
+    },
+    "subject_type_pattern": {
+      "description": "Optional subject type pattern (p2, PRD cpt-cf-approval-service-fr-subject-type-selector). Compared after the resource selector and the opportunity pattern for specificity.",
+      "type": "string",
+      "maxLength": 1024,
+      "x-gts-pattern-ref": "gts.*"
+    },
+    "action": {
+      "description": "Rule action. Strictness order: deny, require_approval, not_required. Enum evolution: closed by the PRD; a new action requires a new major.",
+      "type": "string",
+      "enum": [
+        "deny",
+        "require_approval",
+        "not_required"
+      ]
+    },
+    "overridable": {
+      "description": "Whether descendant runtime rules may relax this rule (p3, PRD cpt-cf-approval-service-fr-delegable-rules). Always false before p3.",
+      "type": "boolean",
+      "default": false
+    },
+    "reason": {
+      "description": "Reason recorded with the last change. Mandatory for runtime rules.",
+      "type": "string",
+      "maxLength": 2048
+    },
+    "row_version": {
+      "description": "Optimistic concurrency version; exposed as the ETag of the rule.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "layer",
+    "scope_tenant_id",
+    "opportunity_pattern",
+    "resource_selector",
+    "action"
+  ],
+  "definitions": {
+    "ResourceSelector": {
+      "description": "Exactly one of: a projection type pattern, or one specific projection. A specific projection is more specific than any type pattern.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projection_type_pattern": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-gts-pattern-ref": "gts.cf.core.approval.projection.v1~"
+        },
+        "projection_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "projection_type_pattern"
+          ]
+        },
+        {
+          "required": [
+            "projection_id"
+          ]
+        }
+      ]
+    }
+  }
+}

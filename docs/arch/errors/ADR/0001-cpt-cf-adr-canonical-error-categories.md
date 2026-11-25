@@ -5,6 +5,24 @@ date: 2026-02-28
 
 # Use 16 Canonical Error Categories Instead of Full HTTP Status Set
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Full HTTP Status Code Set](#option-a-full-http-status-code-set)
+  - [Option B: Google's 16 Canonical Error Codes](#option-b-googles-16-canonical-error-codes)
+  - [Option C: Custom Reduced Set (5-10 Categories)](#option-c-custom-reduced-set-5-10-categories)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-errors-adr-canonical-error-categories`
 
 ## Context and Problem Statement

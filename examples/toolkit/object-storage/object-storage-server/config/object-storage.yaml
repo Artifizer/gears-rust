@@ -1,0 +1,109 @@
+# Standalone configuration of the object-storage example under Operation Governance.
+#
+#   cargo run -p object-storage-server -- --config examples/toolkit/object-storage/object-storage-server/config/object-storage.yaml
+#
+# Policies live in `og-rego-config-plugin`. Each one belongs to a Governed
+# Operation family (the type ID without its version) and reads Facts as
+# `input.facts.<id>`. The Facts each operation declares are in
+# examples/toolkit/object-storage/object-storage-sdk/src/gts.rs.
+
+server:
+  home_dir: "~/.cf-gears-object-storage"
+
+database:
+  servers:
+    local:
+      engine: "sqlite"
+      params:
+        WAL: "true"
+      pool:
+        max_conns: 5
+
+gears:
+  types-registry:
+    config: {}
+  authn-resolver:
+    config:
+      vendor: "constructorfabric"
+  authz-resolver:
+    config:
+      vendor: "constructorfabric"
+  tenant-resolver:
+    config:
+      vendor: "constructorfabric"
+  static-authn-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+      mode: accept_all
+  static-authz-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+  api-gateway:
+    config:
+      bind_addr: "127.0.0.1:8090"
+      enable_docs: true
+      auth_disabled: true
+
+  object-storage:
+    database:
+      server: "local"
+      file: "object_storage.db"
+    config:
+      max_body_bytes: 1048576
+      governance_vendor: "constructorfabric"
+      # Never cache governance rules longer than this, whatever lease the
+      # plugin grants.
+      governance_max_lease_ms: 60000
+
+  og-rego-config-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+      eval_timeout_ms: 50
+      # Grant lease of cached rules: gears reuse an applicability answer for
+      # this long, so a policy change reaches them within 30 s.
+      applicability_lease_ms: 30000
+      operations:
+        # Create: a request Fact and a computed Fact.
+        - operation: "gts.cf.core.og.governed_operation.v1~x.object_storage.object.create.v1~"
+          policies:
+            - name: "no-executables"
+              kind: guardrail
+              source: |
+                package object_storage.no_executables
+                deny contains "executables cannot be stored" if {
+                  input.facts.content_type == "application/x-msdownload"
+                }
+            - name: "large-objects"
+              kind: approval
+              source: |
+                package object_storage.large_objects
+                require_approval contains "objects over 10 MB need approval" if {
+                  input.facts.size_bytes > 10485760
+                }
+
+        # Read: a computed Fact on the stored object's labels.
+        - operation: "gts.cf.core.og.governed_operation.v1~x.object_storage.object.get.v1~"
+          policies:
+            - name: "confidential-owner-only"
+              kind: guardrail
+              source: |
+                package object_storage.confidential
+                deny contains "confidential objects are readable by their owner only" if {
+                  input.facts.labels.classification == "confidential"
+                  not input.facts.is_owner
+                }
+
+        # Delete: costly Facts, built from the generated `created_at`. The
+        # object is read only because this policy reads its age.
+        - operation: "gts.cf.core.og.governed_operation.v1~x.object_storage.object.delete.v1~"
+          policies:
+            - name: "retention"
+              kind: guardrail
+              source: |
+                package object_storage.retention
+                deny contains "objects younger than one hour cannot be deleted" if {
+                  input.facts.age_seconds < 3600
+                }

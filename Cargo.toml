@@ -128,6 +128,9 @@ members = [
     "examples/toolkit/users-info/users-info-sdk",
     "examples/toolkit/users-info/users-info",
     "examples/toolkit/users-info/users-info-server",
+    "examples/toolkit/object-storage/object-storage-sdk",
+    "examples/toolkit/object-storage/object-storage",
+    "examples/toolkit/object-storage/object-storage-server",
     "examples/oop-gears/calculator-gateway/calculator-gateway-sdk",
     "examples/oop-gears/calculator-gateway/calculator-gateway",
     "examples/oop-gears/calculator/calculator-sdk",
@@ -200,6 +203,9 @@ members = [
     "gears/system/event-broker/plugins/sqlite-event-broker-plugin",
     "gears/system/admission-control/admission-control-sdk",
     "gears/system/admission-control/admission-control",
+    "gears/system/operation-governance/operation-governance-macros",
+    "gears/system/operation-governance/operation-governance-sdk",
+    "gears/system/operation-governance/plugins/rego-config-plugin",
     "gears/system/policy-engine/policy-engine-sdk",
     "gears/system/policy-engine/policy-engine",
 ]
@@ -918,6 +924,7 @@ static-license-plugin = { package = "cf-gears-static-license-plugin", version = 
 # Admission control + policy engine
 admission-control-sdk = { package = "cf-gears-admission-control-sdk", version = "0.1.0", path = "gears/system/admission-control/admission-control-sdk" }
 admission-control = { package = "cf-gears-admission-control", version = "0.1.0", path = "gears/system/admission-control/admission-control" }
+operation-governance-sdk = { package = "cf-gears-operation-governance-sdk", version = "0.1.0", path = "gears/system/operation-governance/operation-governance-sdk" }
 policy-engine-sdk = { package = "cf-gears-policy-engine-sdk", version = "0.1.0", path = "gears/system/policy-engine/policy-engine-sdk" }
 policy-engine = { package = "cf-gears-policy-engine", version = "0.1.0", path = "gears/system/policy-engine/policy-engine" }
 # Rego interpreter backing `toolkit-policy-evaluation`. Never enable `mimalloc` /

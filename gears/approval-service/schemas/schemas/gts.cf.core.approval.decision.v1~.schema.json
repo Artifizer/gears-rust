@@ -1,0 +1,141 @@
+{
+  "$id": "gts://gts.cf.core.approval.decision.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Approval Decision entity: an 'approve' or 'deny' for one opportunity, one projection, and one subject, recorded at a scope tenant with a mandatory reason (PRD cpt-cf-approval-service-fr-submit-decision). Only 'active' decisions apply. An approve that references an open request is bound to that request's context fingerprint; an approve without a request is a standing approval and applies only when the opportunity allows standing approvals. Records are anonymous instances. This type is the PDP resource type for the decision read permission and the subject type of decision change events (DESIGN cpt-cf-approval-service-entity-decision).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "opportunity_type": {
+      "type": "string",
+      "x-gts-type-ref": "gts.cf.core.approval.opportunity.v1~"
+    },
+    "projection_id": {
+      "description": "Identifier of the registered projection the decision applies to.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "subject": {
+      "description": "Subject identifiers. A tenant subject applies to every subject of that tenant and its descendants; a group subject (p2) applies to every member.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "subject_type": {
+          "type": "string",
+          "x-gts-type-ref": "gts.*"
+        },
+        "subject_tenant_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "subject_id": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "subject_type",
+        "subject_tenant_id",
+        "subject_id"
+      ]
+    },
+    "scope_tenant_id": {
+      "description": "Tenant at which the decision is recorded; constrained by the opportunity's decision authority.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "action": {
+      "description": "Enum evolution: closed by the PRD; a new action requires a new major.",
+      "type": "string",
+      "enum": [
+        "approve",
+        "deny"
+      ]
+    },
+    "status": {
+      "description": "Decision lifecycle state. 'expired' is p2. Enum evolution: new values only in a new major; readers treat unknown values as not applying.",
+      "type": "string",
+      "enum": [
+        "active",
+        "superseded",
+        "revoked",
+        "expired",
+        "archived"
+      ]
+    },
+    "approver_id": {
+      "description": "User who made the decision.",
+      "type": "string",
+      "maxLength": 256
+    },
+    "recorded_by": {
+      "description": "Service identity of the gear that recorded the decision on behalf of approver_id (p2, PRD cpt-cf-approval-service-fr-on-behalf-decision). Absent for direct decisions.",
+      "type": "string",
+      "maxLength": 256
+    },
+    "reason": {
+      "description": "Mandatory reason given by the approver.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "request_id": {
+      "description": "Open request the decision referenced, if any.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "context_fingerprint": {
+      "description": "Fingerprint the approve decision is bound to; absent for deny decisions and standing approvals.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "lease_secs": {
+      "description": "Approval lease set on an approve decision; the configured default when not set; never above the configured maximum (PRD cpt-cf-approval-service-fr-approval-lease).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "expires_at": {
+      "description": "Optional expiry time (p2, PRD cpt-cf-approval-service-fr-decision-expiry).",
+      "type": "string",
+      "format": "date-time"
+    },
+    "supersedes_id": {
+      "description": "The same approver's previous decision that this one superseded.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "end_reason": {
+      "description": "Reason given when the decision was revoked; system text for expired and archived.",
+      "type": "string",
+      "maxLength": 2048
+    },
+    "verdict_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "opportunity_type",
+    "projection_id",
+    "subject",
+    "scope_tenant_id",
+    "action",
+    "status",
+    "approver_id",
+    "reason",
+    "verdict_version",
+    "created_at"
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "$id": "gts://gts.cf.core.events.event.v1~cf.core.approval.rule_changed.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Change event 'rule_changed'. Published when a runtime rule is created, changed, or deleted with a reason (PRD cpt-cf-approval-service-fr-approval-rules), and for each configuration-file rule added, changed, or removed when the service starts with a changed configuration digest (PRD cpt-cf-approval-service-fr-event-notifications). Gear-default changes publish opportunity_changed. Derived from the Event Broker base event type; routed to the approval_events topic and partitioned by subject for per-entity ordering.",
+  "x-gts-traits": {
+    "topic": "gts.cf.core.events.topic.v1~cf.core.approval.approval_events.v1",
+    "partition_key": "/subject",
+    "allowed_subject_types": [
+      "gts.cf.core.approval.rule.v1~"
+    ]
+  },
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "gts://gts.cf.core.events.event.v1~"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "gts.cf.core.events.event.v1~cf.core.approval.rule_changed.v1~",
+          "$comment": "Pins the event-type identifier so an editor can validate a payload against this schema alone."
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rule_id": {
+              "description": "The rule (also the event subject): a UUID for runtime rules, the stable synthetic identifier for configuration rules.",
+              "type": "string",
+              "maxLength": 512
+            },
+            "layer": {
+              "description": "Layer of the changed rule. Enum evolution: new layers only in a new major.",
+              "type": "string",
+              "enum": [
+                "runtime",
+                "configuration"
+              ]
+            },
+            "change": {
+              "description": "Kind of change. Enum evolution: new kinds only in a new major.",
+              "type": "string",
+              "enum": [
+                "created",
+                "updated",
+                "deleted"
+              ]
+            },
+            "affected": {
+              "description": "Patterns before and after the change (one entry for create or delete, up to two for update), so consumers can invalidate every verdict the change can affect.",
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "opportunity_pattern": {
+                    "type": "string",
+                    "maxLength": 1024
+                  },
+                  "resource_selector": {
+                    "description": "Resource selector: exactly one of a projection type pattern or one specific projection.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "projection_type_pattern": {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      "projection_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    }
+                  },
+                  "subject_type_pattern": {
+                    "type": "string",
+                    "maxLength": 1024
+                  }
+                },
+                "required": [
+                  "opportunity_pattern",
+                  "resource_selector"
+                ]
+              }
+            },
+            "reason": {
+              "description": "Change reason: mandatory caller reason for runtime changes; for configuration changes, a service text naming the old and new configuration digests.",
+              "type": "string",
+              "maxLength": 2048
+            },
+            "verdict_version": {
+              "description": "Monotonic version of the committed change (the change sequence). Verdicts computed after this change carry a version greater than or equal to it.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "dedup_key": {
+              "description": "Deterministic deduplication key (UUIDv5 over change sequence, event type, entity, and target tenant). Delivery is at least once; consumers deduplicate by this key (PRD cpt-cf-approval-service-fr-event-notifications).",
+              "type": "string",
+              "format": "uuid"
+            },
+            "scope_tenant_id": {
+              "description": "Scope tenant of the change.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "changed_by": {
+              "description": "Authenticated identity whose call caused the change. Absent when the service caused it (reconciliation, expiry sweep).",
+              "type": "string",
+              "maxLength": 256
+            },
+            "action": {
+              "description": "Rule action after the change; absent on delete.",
+              "type": "string",
+              "enum": [
+                "deny",
+                "require_approval",
+                "not_required"
+              ]
+            }
+          },
+          "required": [
+            "rule_id",
+            "layer",
+            "change",
+            "affected",
+            "reason",
+            "scope_tenant_id",
+            "verdict_version",
+            "dedup_key"
+          ]
+        }
+      }
+    }
+  ]
+}

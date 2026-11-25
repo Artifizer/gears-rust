@@ -5,6 +5,41 @@ date: 2026-05-20
 
 # SDK Error Surface: Canonical at the Boundary, Opt-in Typed Projection
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Gear-specific SDK errors at the trait boundary](#gear-specific-sdk-errors-at-the-trait-boundary)
+  - [Canonical errors only](#canonical-errors-only)
+  - [Canonical errors with optional typed projections](#canonical-errors-with-optional-typed-projections)
+- [The Pattern](#the-pattern)
+  - [Trait signature — canonical at the boundary](#trait-signature--canonical-at-the-boundary)
+  - [Impl-side facade — single `.map_err`](#impl-side-facade--single-map_err)
+  - [Optional projection — typed view over canonical](#optional-projection--typed-view-over-canonical)
+  - [Co-located vocabulary](#co-located-vocabulary)
+  - [Round-trip tests pin the vocabulary](#round-trip-tests-pin-the-vocabulary)
+- [Consumer Integration](#consumer-integration)
+  - [Pattern 1 — pure propagation (no projection)](#pattern-1--pure-propagation-no-projection)
+  - [Pattern 2 — explicit projection at the call site](#pattern-2--explicit-projection-at-the-call-site)
+  - [Pattern 3 — transparent chaining via `From<CanonicalError> for OwnError`](#pattern-3--transparent-chaining-via-fromcanonicalerror-for-ownerror)
+  - [Reverse direction (consumer wraps SDK failure in its own canonical)](#reverse-direction-consumer-wraps-sdk-failure-in-its-own-canonical)
+  - [Cross-process round-trip](#cross-process-round-trip)
+- [When to Ship a Projection](#when-to-ship-a-projection)
+- [Non-Canonical Methods](#non-canonical-methods)
+- [Design Rules](#design-rules)
+- [Per-SDK Migration](#per-sdk-migration)
+- [Known Gaps](#known-gaps)
+- [Conformance with Existing Docs](#conformance-with-existing-docs)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-errors-adr-sdk-canonical-projection`
 
 ## Context and Problem Statement
@@ -30,6 +65,12 @@ What's the right shape for the SDK error surface?
 * Ergonomic typed dispatch when consumers want it — flat match arms, typed sub-enums for context discriminators
 * Conformance with `cpt-cf-errors-adr-canonical-error-categories` — finite vocabulary, no gear-specific error categories
 * `cpt-cf-errors-principle-single-error-gateway` — REST path goes through `CanonicalError` unchanged
+
+## Considered Options
+
+- Maintain gear-specific SDK error enums at the trait boundary.
+- Expose only the platform canonical error.
+- Expose the platform canonical error with optional typed projections at call sites.
 
 ## Decision Outcome
 
@@ -80,6 +121,20 @@ The OAGW SDK demonstrates the pattern end-to-end:
 (h) Workspace `cargo test` passes (~1,800 tests across `oagw-sdk`, `oagw`, `mini-chat`, `toolkit-canonical-errors`).
 
 (i) **`simple-user-settings-sdk` is the Pattern 1 (no-projection) reference**: trait returns `Result<_, CanonicalError>`, no `SettingsError` enum, no `From<DomainError> for SettingsError` ladder. Consumers either propagate via `?` or match on `CanonicalError` categories directly. Demonstrates the lower bound of the pattern — when the projection layer would add cost without dispatch value.
+
+## Pros and Cons of the Options
+
+### Gear-specific SDK errors at the trait boundary
+
+- Give consumers typed dispatch directly. The enum surface couples consumers to each gear's vocabulary and makes variant changes breaking.
+
+### Canonical errors only
+
+- Give all consumers the same error contract and preserve the full error. Consumers that need typed dispatch must interpret context themselves.
+
+### Canonical errors with optional typed projections
+
+- Preserve a common trait contract while providing typed dispatch where useful. Each optional projection adds SDK code and round-trip coverage.
 
 ## The Pattern
 

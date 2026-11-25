@@ -1,0 +1,32 @@
+[package]
+name = "object-storage-sdk"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SDK of the object-storage example gear: client trait, models, and its Governed Operation types"
+
+[lib]
+name = "object_storage_sdk"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+gts = { workspace = true }
+
+toolkit-gts = { workspace = true }
+toolkit = { workspace = true }
+toolkit-macros = { workspace = true }
+toolkit-security = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+
+# Governed Operation base type the operation types below derive from.
+operation-governance-sdk = { workspace = true }

@@ -6,6 +6,34 @@ decision-makers: Constructor Fabric steering committee
 
 # ADR-0002: Safe Property-Graph Queries (SQL/PGQ) in the Secure ORM
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Where the code lives](#where-the-code-lives)
+  - [API shape](#api-shape)
+  - [Policy 1 — no label-only matching](#policy-1--no-label-only-matching)
+  - [Policy 2 — every element table must resolve a scope property](#policy-2--every-element-table-must-resolve-a-scope-property)
+  - [Policy 3 — one declaration for both DDL and query](#policy-3--one-declaration-for-both-ddl-and-query)
+  - [Addressing a scope condition by graph variable](#addressing-a-scope-condition-by-graph-variable)
+  - [Backend gating](#backend-gating)
+  - [Feasibility constraints (must be honored by the implementation)](#feasibility-constraints-must-be-honored-by-the-implementation)
+  - [What this does not replace](#what-this-does-not-replace)
+  - [Levels of strictness](#levels-of-strictness)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: typed-element `SecureGraphSelect` from `SecureSelect<E, Scoped>`](#option-a-typed-element-securegraphselect-from-secureselecte-scoped)
+  - [Option B: label-addressed elements with a runtime registry](#option-b-label-addressed-elements-with-a-runtime-registry)
+  - [Option C: raw `GRAPH_TABLE` / `CREATE PROPERTY GRAPH` strings in gear code](#option-c-raw-graph_table--create-property-graph-strings-in-gear-code)
+  - [Option D: decline SQL/PGQ; keep `recursive_cte` and closure tables](#option-d-decline-sqlpgq-keep-recursive_cte-and-closure-tables)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-adr-secure-property-graph-policy`
 
 > **Deferred until PostgreSQL 20, 2026-10-14** (gears-rust #5343). PostgreSQL 19 GA ships without SQL/PGQ (reverted in 19 beta 4), so the re-validation "at GA" moves to the PostgreSQL 20 betas; until then the integration suite runs only while a 19 beta image is pullable.

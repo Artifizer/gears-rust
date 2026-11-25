@@ -5,6 +5,24 @@ date: 2026-02-28
 
 # Use GTS Type System for Error Category Identification
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Plain String Constants](#option-a-plain-string-constants)
+  - [Option B: GTS Compound Type Identifiers](#option-b-gts-compound-type-identifiers)
+  - [Option C: URN-Style Identifiers](#option-c-urn-style-identifiers)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-errors-adr-gts-error-identification`
 
 ## Context and Problem Statement

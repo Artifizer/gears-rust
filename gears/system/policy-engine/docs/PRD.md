@@ -1,5 +1,5 @@
 ---
-description: "Product requirements for the Policy Engine: configured built-in policies and versioned Rego deny-rule bundles assigned to tenants, evaluated as the default admission-control engine plugin."
+description: "Product requirements for the Policy Engine: configured built-in policies and versioned Rego deny-rule bundles assigned to tenants, evaluated as the default Guardrail Stage of the admission-control governance gate."
 ---
 
 <!-- cpt:
@@ -38,7 +38,7 @@ system: cf
   - [7.2 External Integration Contracts](#72-external-integration-contracts)
 - [8. Use Cases](#8-use-cases)
   - [Author and Activate a Policy Bundle](#author-and-activate-a-policy-bundle)
-  - [Evaluate an Admission Request](#evaluate-an-admission-request)
+  - [Evaluate a Guardrail Stage Request](#evaluate-a-guardrail-stage-request)
 - [9. Acceptance Criteria](#9-acceptance-criteria)
 - [10. Dependencies](#10-dependencies)
 - [11. Assumptions](#11-assumptions)
@@ -53,16 +53,20 @@ system: cf
 
 ### 1.1 Purpose
 
-Policy Engine evaluates platform and tenant policy for the platform's admission gate, as its default engine. Policy is
-written as Rego documents that define a boolean `deny` rule. Platform rules are built-in policies from the gear's
-configuration and apply to every tenant; tenant rules are grouped into versioned bundles and assigned to tenants. It
-serves exactly two surfaces: the `admission-control` engine plugin, which is the only decision surface, and a
-management API (Rust client and REST) for authoring, validating, activating and assigning bundles.
+Policy Engine is the default Guardrail Stage of [Operation Governance](../../../../docs/arch/operation-governance/PRD.md):
+it evaluates Guardrail Policies for the governance gate, `admission-control`. Policy is written as Rego documents that
+define a boolean `deny` rule. Platform rules are built-in policies from the gear's configuration and apply to every
+tenant; tenant rules are grouped into versioned bundles and assigned to tenants. It serves exactly two surfaces: the
+`admission-control` Governance Stage plugin, which is the only decision surface, and a management API (Rust client and
+REST) for authoring, validating, activating and assigning bundles. Terms such as Governed Operation, Facts, Governance
+Stage and Applicability Snapshot are defined in the
+[Operation Governance glossary](../../../../docs/arch/operation-governance/PRD.md#14-glossary).
 
 ### 1.2 Background / Problem Statement
 
 Enforcing gears (Infrastructure Resource Manager first) call `admission-control` before an operation. The gate makes
-no policy decision itself; it delegates to one pluggable engine. Policy Engine is the default engine: it evaluates the
+no policy decision itself; it runs ordered Governance Stages. Policy Engine is the default Guardrail Stage, which runs
+first and has no side effects: it evaluates the
 platform's built-in policies, then the policy assigned to the resource's tenant and its ancestors, in isolation, and
 answers permit or deny, failing closed on any error. Tenant rules are authored and changed at runtime; built-in
 policies change only with the configuration, and are the only rules that reach tenants behind a barrier.
@@ -117,7 +121,8 @@ policies change only with the configuration, and are the only rules that reach t
 
 **ID**: `cpt-cf-policy-engine-actor-admission-gateway`
 
-- **Role**: `admission-control`; calls this gear as its engine plugin and is its only decision consumer.
+- **Role**: `admission-control`, the governance gate; calls this gear as its Guardrail Stage and is its only decision
+  consumer.
 
 #### Enforcing Gear
 
@@ -139,8 +144,9 @@ policies change only with the configuration, and are the only rules that reach t
 
 ## 3. Operational Concept & Environment
 
-The gear runs in-process with its consumers, persists content through `toolkit-db` (Postgres or SQLite), and runs no
-background tasks. Project-wide runtime conventions are in [docs/ARCHITECTURE_MANIFEST.md](../../../../docs/ARCHITECTURE_MANIFEST.md).
+The gear runs in the same unit as `admission-control` in every ToolKit profile (in-process in Embedded; inside the
+gate's out-of-process unit in Self-Hosted and Kubernetes Native), so only this gear reaches its store. It persists
+content through `toolkit-db` (Postgres or SQLite) and runs no background tasks. Project-wide runtime conventions are in [docs/ARCHITECTURE_MANIFEST.md](../../../../docs/ARCHITECTURE_MANIFEST.md).
 Policy Engine evaluates on the shared Rego facility (`toolkit-policy-evaluation`).
 
 ## 4. Scope
@@ -151,13 +157,16 @@ Policy Engine evaluates on the shared Rego facility (`toolkit-policy-evaluation`
 - Bundles, versions and documents, with the draft, active, superseded lifecycle.
 - Content validation at validate and activate time.
 - Assignment to tenants with inheritance along the ancestry, barriers respected, and enforce or shadow mode.
-- Evaluation as the `admission-control` engine plugin, with tenant boundary check and fail-closed semantics.
+- Evaluation as the `admission-control` Guardrail Stage, in enforce and Preview mode, with tenant boundary check and
+  fail-closed semantics.
+- Applicability reports for the Applicability Snapshot: which Governed Operations and tenant scopes a Guardrail Policy
+  applies to, and which Facts it reads; change notices after content changes.
 - Management API (Rust client and REST) authorized by three permissions.
 
 ### 4.2 Out of Scope
 
 - A runtime API for built-in policies: they change only with the configuration.
-- Any decision API other than the engine plugin; callers reach policy through `admission-control`.
+- Any decision API other than the Governance Stage plugin; callers reach policy through `admission-control`.
 - Recording decisions, violations, audit export or refusal events: `admission-control` publishes refusal events.
 - Permit-side outcomes: documents can only deny.
 - Policy languages other than Rego, batch evaluation, and version comparison tooling.
@@ -201,7 +210,7 @@ pass; no determinism or resource-heavy builtin is referenced; at least one valid
 concrete type id exists in `types-registry`; the version respects the configured document count and document size limits; document names are printable and fit in a
 denial, and resource types and actions are bounded in number and length. Saving an incomplete draft is allowed, but
 not one that breaks a bound or names a document unprintably; activating a failing one is refused. The registry is
-consulted only at validate and activate, never per request.
+consulted only at validate and activate, never per request. Validate and activate also refuse a document that reads a Fact (`input.properties.<name>`) that a Governed Operation type it can match does not declare, and a tenant document whose `input.properties` references cannot all be resolved statically.
 
 - **Actors**: `cpt-cf-policy-engine-actor-policy-author`, `cpt-cf-policy-engine-actor-types-registry`
 
@@ -290,13 +299,15 @@ compiles and never fails a request for its content.
 
 - **Actors**: `cpt-cf-policy-engine-actor-platform-operator`, `cpt-cf-policy-engine-actor-types-registry`
 
-#### Admission Engine Plugin
+#### Guardrail Stage Plugin
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-fr-admission-engine`
 
-The system **MUST** register as an `admission-control` engine plugin and answer each evaluation with a permit or a
-denial. It **MUST** expose no other decision surface and no batch call; enforcing gears reach it only through the
-gateway.
+The system **MUST** register as the `admission-control` Guardrail Stage (`GovernanceStagePluginClientV1`; kind `guardrail`,
+first in order, no side effects, Preview supported) and answer each evaluation with a permit or a denial. A Preview
+evaluation **MUST** give the same answer as an enforce evaluation. Until `AdmissionClientV1` is retired, the system
+**MUST** also serve the V1 engine plugin contract with the same answers. It **MUST** expose no other decision surface
+and no batch call; enforcing gears reach it only through the gate.
 
 - **Actors**: `cpt-cf-policy-engine-actor-admission-gateway`, `cpt-cf-policy-engine-actor-enforcing-gear`
 
@@ -316,8 +327,9 @@ the system **MUST** deny with reason `TENANT_BOUNDARY` and evaluate no tenant po
 
 The applicable documents **MUST** be those of the active versions of bundles assigned along the tenant chain (by
 assignments that currently apply) whose
-resource types match the request's resource type and whose actions are unlisted or include the action. Every
-applicable document is evaluated; none is skipped after a denial.
+resource types match the request's resource type and whose actions are unlisted or include the action. The action is
+the Governed Operation family (its type ID without the version), so a new version of the type keeps matching the same
+documents. Every applicable document is evaluated; none is skipped after a denial.
 
 - **Actors**: `cpt-cf-policy-engine-actor-admission-gateway`
 
@@ -326,15 +338,33 @@ applicable document is evaluated; none is skipped after a denial.
 - [ ] `p2` - **ID**: `cpt-cf-policy-engine-fr-active-content-loading`
 
 An activation, assignment, assignment update or unassignment **MUST** take effect on the next evaluation request, with
-no restart and no propagation delay.
+no restart and no propagation delay. Operations that the Applicability Snapshot lets skip the gate see the change
+within the Policy Propagation Delay (`cpt-cf-policy-engine-fr-applicability`).
 
 - **Actors**: `cpt-cf-policy-engine-actor-platform-operator`
+
+#### Applicability and Facts Read
+
+- [ ] `p1` - **ID**: `cpt-cf-policy-engine-fr-applicability`
+
+The system **MUST** report to the gate, per Governed Operation (action and resource type) and tenant scope, whether any
+built-in policy or enforcing or shadow assignment applies, and which Facts (`properties`) the applicable documents read,
+found by static analysis of `input.properties` references. A built-in policy whose references cannot be resolved
+statically **MUST** count as reading every declared Fact; a tenant document like that is refused at validation
+(`cpt-cf-policy-engine-fr-content-validation`). After every activation, assignment change, or unassignment, the system
+**MUST** publish a change notice with a new applicability version. The gate asks the gear for missing Facts before
+this stage runs, so the stage evaluates only with the Facts it is sent.
+
+- **Rationale**: Operations that no Guardrail Policy governs must cost nothing, and governed ones must load only the
+  Facts that are read ([Operation Governance ADR 0002](../../../../docs/arch/operation-governance/ADR/0002-cpt-cf-operation-governance-adr-fact-collection.md)).
+- **Actors**: `cpt-cf-policy-engine-actor-admission-gateway`
 
 #### Evaluation Input
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-fr-evaluation-input`
 
-Rego input **MUST** be `action`, `resource` (`type`, `id`, `tenant_id`), `properties` and `subject` (`id`,
+Rego input **MUST** be `action` (the Governed Operation family), `resource` (`type`, `id`, `tenant_id`), `properties` (the
+Facts) and `subject` (`id`,
 `tenant_id`), the same for built-in policies and documents. The subject comes from the caller's security context only;
 an anonymous context is an invalid request.
 
@@ -551,12 +581,13 @@ terminates the host.
 
 ### 7.2 External Integration Contracts
 
-#### Admission Engine Plugin Contract
+#### Governance Stage Plugin Contract
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-contract-admission-engine`
 
 - **Direction**: provided to `admission-control`
-- **Protocol/Format**: The `admission-control` engine plugin contract, in-process, registered as a GTS plugin instance.
+- **Protocol/Format**: The `admission-control` `GovernanceStagePluginClientV1` contract (`evaluate`, `applicability`),
+  registered as a GTS stage plugin instance; the V1 engine plugin contract until `AdmissionClientV1` is retired.
 - **Compatibility**: Governed by the `admission-control` SDK version.
 
 #### GTS Registrations
@@ -564,7 +595,8 @@ terminates the host.
 - [ ] `p2` - **ID**: `cpt-cf-policy-engine-contract-gts`
 
 - **Direction**: provided to `types-registry`
-- **Protocol/Format**: Resource types for bundle, bundle version and assignment, the engine plugin instance, and the
+- **Protocol/Format**: Resource types for bundle, bundle version and assignment, the stage plugin instance (and the V1
+  engine plugin instance), the applicability change event, and the
   `read`, `author` and `publish` permission instances.
 - **Compatibility**: GTS-versioned (`v1`).
 
@@ -603,7 +635,7 @@ terminates the host.
 
 - **Validation fails**: activation is refused with every finding; the draft stays editable.
 
-### Evaluate an Admission Request
+### Evaluate a Guardrail Stage Request
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-usecase-admit-operation`
 
@@ -611,11 +643,11 @@ terminates the host.
 
 **Preconditions**:
 
-- The engine is selected in `admission-control`.
+- The gear is selected as the Guardrail Stage in `admission-control`.
 
 **Main Flow**:
 
-1. The gateway asks the engine to evaluate the operation.
+1. The gate asks the Guardrail Stage to evaluate the operation, in enforce or Preview mode.
 2. The gear evaluates the matching built-in policies; the first denial is returned at once.
 3. It resolves the tenant chain, checks the tenant boundary against it and loads the assigned active documents.
 4. It evaluates the matching documents and returns a permit or a denial, with any shadow denials.
@@ -642,13 +674,17 @@ terminates the host.
 - [ ] Assignment changes record `created_by` and `updated_by` and log the actor, assignment id, bundle id and target tenant.
 - [ ] Versions are listed newest first in pages of 25 by default, 100 at most.
 - [ ] Every injected dependency failure, timeout or evaluation error yields a failure, never a permit.
+- [ ] A Preview evaluation gives the same answer as an enforce evaluation.
+- [ ] Activating a version that denies an operation reports it as applicable, with the Facts its documents read, and
+  publishes a change notice.
 - [ ] Each management operation is refused without its permission.
 
 ## 10. Dependencies
 
 | Dependency | Description | Criticality |
 |------------|-------------|-------------|
-| `admission-control` | Consumes the engine plugin contract | p1 |
+| `admission-control` | Consumes the Governance Stage plugin contract | p1 |
+| `event-broker` | Receives applicability change notices | p2 |
 | `tenant-resolver` | Ancestry (decisions) and reachability (management) | p1 |
 | `types-registry` | Concrete type id checks at startup (built-ins), validate and activate; GTS registration | p1 |
 | `authz-resolver` | Authorizes management operations | p1 |
@@ -657,7 +693,8 @@ terminates the host.
 
 ## 11. Assumptions
 
-- Enforcing gears supply complete operation properties; a missing property evaluates as absent.
+- The gate validates Facts against the Governed Operation type and gets every Fact the applicable documents read before
+  this stage runs; a Fact that no applicable document reads may be absent.
 - Policy volume per tenant is small, so a per-request indexed read is affordable.
 - Consumers enforce the verdicts `admission-control` returns.
 
@@ -698,4 +735,5 @@ The previous PRD was cut down to the default admission-control engine. Removed o
 ## 15. Traceability
 
 - **Design**: [DESIGN.md](./DESIGN.md)
+- **Subsystem**: [Operation Governance PRD](../../../../docs/arch/operation-governance/PRD.md), [ADR 0001](../../../../docs/arch/operation-governance/ADR/0001-cpt-cf-operation-governance-adr-governance-gate.md), [ADR 0002](../../../../docs/arch/operation-governance/ADR/0002-cpt-cf-operation-governance-adr-fact-collection.md)
 - **Consumer**: [admission-control](../../admission-control/docs/PRD.md)

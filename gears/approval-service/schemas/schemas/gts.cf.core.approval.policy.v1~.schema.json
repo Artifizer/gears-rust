@@ -1,0 +1,183 @@
+{
+  "$id": "gts://gts.cf.core.approval.policy.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Approval Policy entity: what approval must consist of for an opportunity pattern and resource selector (PRD cpt-cf-approval-service-fr-approval-policies). Every applicable policy of the subject tenant and its ancestors must be satisfied (logical AND). Requirements are expressed as ordered stages: a p1 policy has exactly one stage; staged policies with several stages are p2 (PRD cpt-cf-approval-service-fr-staged-policies). Policies come from the 'runtime' layer (any tenant) or the 'configuration' layer (root tenant, read-only through the API). This type is the subject type of policy change events (DESIGN cpt-cf-approval-service-entity-policy).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "Policy identifier. UUID for runtime policies; a stable synthetic identifier for configuration policies.",
+      "type": "string",
+      "maxLength": 512
+    },
+    "layer": {
+      "type": "string",
+      "enum": [
+        "runtime",
+        "configuration"
+      ]
+    },
+    "scope_tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "opportunity_pattern": {
+      "type": "string",
+      "maxLength": 1024,
+      "x-gts-pattern-ref": "gts.cf.core.approval.opportunity.v1~"
+    },
+    "resource_selector": {
+      "description": "Exactly one of a projection type pattern or one specific projection.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projection_type_pattern": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-gts-pattern-ref": "gts.cf.core.approval.projection.v1~"
+        },
+        "projection_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "projection_type_pattern"
+          ]
+        },
+        {
+          "required": [
+            "projection_id"
+          ]
+        }
+      ]
+    },
+    "subject_type_pattern": {
+      "description": "Optional subject type pattern (p2).",
+      "type": "string",
+      "maxLength": 1024,
+      "x-gts-pattern-ref": "gts.*"
+    },
+    "condition": {
+      "description": "Optional CEL condition over opportunity, subject, projection, and context attributes (p2, PRD cpt-cf-approval-service-fr-conditional-policies). The policy applies only when it evaluates to true; an evaluation failure means not applicable.",
+      "type": "string",
+      "maxLength": 4096
+    },
+    "stages": {
+      "description": "Ordered approval stages. Exactly one in p1. An approve decision counts toward a stage only if recorded after the previous stage was satisfied.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/definitions/Stage"
+      }
+    },
+    "max_lease_secs": {
+      "description": "Optional maximum approval lease for verdicts this policy applies to; never above the configured maximum (PRD cpt-cf-approval-service-fr-approval-lease).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "forbid_auto_approval": {
+      "description": "When true, only human approvals satisfy this policy (p2, PRD cpt-cf-approval-service-fr-auto-approval).",
+      "type": "boolean",
+      "default": false
+    },
+    "escalation_recipients": {
+      "description": "Users or groups named in request-escalated events while this policy is unmet (p2, PRD cpt-cf-approval-service-fr-request-escalation). Naming a recipient grants nothing.",
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/definitions/ApproverRef"
+      },
+      "default": []
+    },
+    "version": {
+      "description": "Policy version, incremented on every change; fixed into request policy snapshots (p2, PRD cpt-cf-approval-service-fr-policy-snapshot).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "row_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "layer",
+    "scope_tenant_id",
+    "opportunity_pattern",
+    "resource_selector",
+    "stages",
+    "version"
+  ],
+  "definitions": {
+    "Stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_approvals": {
+          "description": "Minimum number of distinct counting approvers.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "mandatory_approvers": {
+          "description": "Approvers who must all approve. Users in p1; groups from the Group Source in p2, satisfied by one member's approval.",
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/definitions/ApproverRef"
+          },
+          "default": []
+        },
+        "approvers": {
+          "description": "Optional narrowed approver list. Absent: every holder of the approve permission counts. Present: only listed approvers count.",
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/definitions/ApproverRef"
+          }
+        }
+      },
+      "required": [
+        "min_approvals"
+      ]
+    },
+    "ApproverRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "'user' (p1) or 'group' (p2). Enum evolution: new kinds only in a new major.",
+          "type": "string",
+          "enum": [
+            "user",
+            "group"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ]
+    }
+  }
+}

@@ -1,0 +1,212 @@
+{
+  "$id": "gts://gts.cf.core.approval.verdict.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Verdict returned by a verification call (PRD cpt-cf-approval-service-fr-verify-approval, cpt-cf-approval-service-contract-verification). Every verdict names what produced it, carries a monotonic verdict_version, and, for 'approved' and 'not_required', an approval lease. Compatibility: new outcomes appear only in a new major of this type; callers MUST treat an unknown outcome as refusal (may_proceed = false). New reason codes are additive within a major (DESIGN cpt-cf-approval-service-interface-sdk-client).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "not_required",
+        "approved",
+        "approval_required",
+        "pending",
+        "denied",
+        "invalid",
+        "unavailable"
+      ]
+    },
+    "may_proceed": {
+      "description": "True only for 'approved' and 'not_required'.",
+      "type": "boolean"
+    },
+    "reason_code": {
+      "description": "Machine-readable reason, for example rule_not_required, rule_deny, decision_deny, policies_satisfied, decision_approved, auto_approved, approval_missing, context_changed, request_open, owner_approval_unreachable, unknown_opportunity, unaccepted_projection_type, unaccepted_subject_type, invalid_context, dependency_unavailable. Additive within a major; unknown codes are informational only.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "verdict_version": {
+      "description": "Monotonic version, present on every verdict (PRD cpt-cf-approval-service-fr-verify-approval): the highest change sequence among the verdict's inputs. 'invalid' carries the catalog version; 'unavailable' carries 0 because no state was read reliably, so it never supersedes a verdict the caller has already seen. Callers reject results older than one they have seen for the same inputs.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "produced_by": {
+      "$ref": "#/definitions/ProducedBy"
+    },
+    "request": {
+      "description": "The open request with the call's context fingerprint ('pending'), or the request just opened by the register option.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "unmet_requirements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "lease": {
+      "description": "Approval lease for 'approved' and 'not_required' verdicts (PRD cpt-cf-approval-service-fr-approval-lease). The caller may rely on the verdict until expires_at and MUST verify again afterwards.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "duration_secs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "duration_secs",
+        "expires_at"
+      ]
+    },
+    "correlation_id": {
+      "description": "Echo of the caller correlation ID.",
+      "type": "string",
+      "maxLength": 256
+    },
+    "evaluated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "outcome",
+    "may_proceed",
+    "reason_code",
+    "verdict_version",
+    "produced_by",
+    "evaluated_at"
+  ],
+  "definitions": {
+    "ProducedBy": {
+      "description": "What produced the verdict.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "Enum evolution: additive within a major; unknown kinds are informational only.",
+          "type": "string",
+          "enum": [
+            "rule",
+            "decisions",
+            "policies",
+            "auto_approval_rule",
+            "validation",
+            "availability"
+          ]
+        },
+        "rule": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "layer": {
+              "type": "string",
+              "enum": [
+                "runtime",
+                "configuration",
+                "gear_default"
+              ]
+            },
+            "scope_tenant_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "deny",
+                "require_approval",
+                "not_required"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "layer",
+            "scope_tenant_id",
+            "action"
+          ]
+        },
+        "decisions": {
+          "description": "Decisions the verdict relies on, with approver, time, and reason (PRD cpt-cf-approval-service-fr-correlation).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "approve",
+                  "deny"
+                ]
+              },
+              "approver_id": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "scope_tenant_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "action",
+              "approver_id",
+              "scope_tenant_id",
+              "reason",
+              "created_at"
+            ]
+          }
+        },
+        "policy_ids": {
+          "description": "Applicable policies (satisfied ones for 'approved').",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 512
+          }
+        },
+        "auto_approval_rule_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    }
+  }
+}

@@ -5,6 +5,24 @@ date: 2026-02-28
 
 # Use RFC 9457 Problem Details as REST Wire Format
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: RFC 9457 Problem Details](#option-a-rfc-9457-problem-details)
+  - [Option B: Custom JSON Error Envelope](#option-b-custom-json-error-envelope)
+  - [Option C: JSON:API Error Format](#option-c-jsonapi-error-format)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-errors-adr-rfc9457-wire-format`
 
 ## Context and Problem Statement

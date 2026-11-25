@@ -6,6 +6,27 @@ decision-makers: Constructor Fabric Steering Committee
 
 # Verified Principal as a Request Extension
 
+**ID**: `cpt-cf-authorization-adr-verified-principal-request-extension`
+
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Contract](#contract)
+  - [Placement](#placement)
+  - [Request flow](#request-flow)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Request-scoped verified principal](#request-scoped-verified-principal)
+  - [Rejected options](#rejected-options)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 ## Context and Problem Statement
 
 Some handlers need verified profile claims about the caller — email, email-verification status,
@@ -142,6 +163,17 @@ sequenceDiagram
   `0.3.x → 0.4.0`) and a corresponding `cf-gears-api-gateway` bump; all construction sites migrate to
   the constructors.
 - Handlers requiring a principal must handle its absence as a 5xx.
+
+### Confirmation
+
+Verify that concurrent requests receive only their own verified principal extension and that a handler requiring the principal fails if the extension is absent.
+
+## Pros and Cons of the Options
+
+### Request-scoped verified principal
+
+- Keeps the profile bound to the validated request and leaves the authorization context unchanged.
+- Requires migration of callers to the new authentication SDK result shape.
 
 ### Rejected options
 

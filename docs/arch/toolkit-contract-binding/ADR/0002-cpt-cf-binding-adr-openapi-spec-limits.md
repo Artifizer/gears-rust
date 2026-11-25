@@ -5,6 +5,29 @@ date: 2026-04-10
 
 # Treat Generated OpenAPI Spec as Minimum Conformance Contract, Not Exhaustive Specification
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Phase 1 scope — what the macro generates](#phase-1-scope--what-the-macro-generates)
+  - [Phase 1 scope — what is explicitly out of scope](#phase-1-scope--what-is-explicitly-out-of-scope)
+  - [Amendment: repeated query parameters are now in scope](#amendment-repeated-query-parameters-are-now-in-scope)
+  - [Amendment: multipart/mixed response streaming is now in scope](#amendment-multipartmixed-response-streaming-is-now-in-scope)
+  - [Escape hatch](#escape-hatch)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Narrow but Honest](#option-a-narrow-but-honest)
+  - [Option B: Aggressive Annotation Vocabulary](#option-b-aggressive-annotation-vocabulary)
+  - [Option C: OpenAPI-First with Augmentation](#option-c-openapi-first-with-augmentation)
+  - [Option D: Dual Source](#option-d-dual-source)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-binding-adr-openapi-spec-limits`
 
 ## Context and Problem Statement

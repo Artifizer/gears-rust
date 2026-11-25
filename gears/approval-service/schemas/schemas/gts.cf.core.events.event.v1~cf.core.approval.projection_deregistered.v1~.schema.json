@@ -1,0 +1,104 @@
+{
+  "$id": "gts://gts.cf.core.events.event.v1~cf.core.approval.projection_deregistered.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Change event 'projection_deregistered'. Published when the owning gear deregisters a projection; its decisions are archived and its open requests closed in the same transaction (PRD cpt-cf-approval-service-fr-resource-projection, cpt-cf-approval-service-upreq-gate-cancel). Event subject = projection ID, subject_type = the projection's GTS type. Derived from the Event Broker base event type; routed to the approval_events topic and partitioned by subject for per-entity ordering.",
+  "x-gts-traits": {
+    "topic": "gts.cf.core.events.topic.v1~cf.core.approval.approval_events.v1",
+    "partition_key": "/subject",
+    "allowed_subject_types": [
+      "gts.cf.core.approval.projection.v1~"
+    ]
+  },
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "gts://gts.cf.core.events.event.v1~"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "gts.cf.core.events.event.v1~cf.core.approval.projection_deregistered.v1~",
+          "$comment": "Pins the event-type identifier so an editor can validate a payload against this schema alone."
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "projection": {
+              "description": "Projection identity.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "projection_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "projection_type": {
+                  "type": "string",
+                  "x-gts-type-ref": "gts.cf.core.approval.projection.v1~"
+                },
+                "resource_tenant_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "resource_id": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "projection_id",
+                "projection_type",
+                "resource_tenant_id",
+                "resource_id",
+                "version"
+              ]
+            },
+            "archived_decision_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "closed_request_count": {
+              "description": "Open requests closed with close_reason projection_deregistered; each also publishes request_closed.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "verdict_version": {
+              "description": "Monotonic version of the committed change (the change sequence). Verdicts computed after this change carry a version greater than or equal to it.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "dedup_key": {
+              "description": "Deterministic deduplication key (UUIDv5 over change sequence, event type, entity, and target tenant). Delivery is at least once; consumers deduplicate by this key (PRD cpt-cf-approval-service-fr-event-notifications).",
+              "type": "string",
+              "format": "uuid"
+            },
+            "scope_tenant_id": {
+              "description": "Scope tenant of the change.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "changed_by": {
+              "description": "Authenticated identity whose call caused the change. Absent when the service caused it (reconciliation, expiry sweep).",
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "projection",
+            "archived_decision_count",
+            "closed_request_count",
+            "scope_tenant_id",
+            "verdict_version",
+            "dedup_key"
+          ]
+        }
+      }
+    }
+  ]
+}

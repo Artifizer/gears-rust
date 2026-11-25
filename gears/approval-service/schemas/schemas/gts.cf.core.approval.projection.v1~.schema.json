@@ -1,0 +1,41 @@
+{
+  "$id": "gts://gts.cf.core.approval.projection.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Resource Projection base type (extension point). Abstract: each gear derives its own projection types, for example gts.cf.core.approval.projection.v1~cf.procurement._.purchase_order.v1~, and may register projections only for types it owns (PRD cpt-cf-approval-service-fr-resource-projection). A projection is the stable, approval-specific presentation of an external resource. The base is deliberately closed ('additionalProperties: false' with no extension field): derived types add identity only, never properties or traits, so no internal resource field can enter the service. Identity is (projection type, resource_tenant_id, resource_id, version); a different version is a different projection (DESIGN cpt-cf-approval-service-entity-projection).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "resource_tenant_id": {
+      "description": "Tenant that owns the resource. Part of the projection identity.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "resource_id": {
+      "description": "Stable resource identifier assigned by the owning gear. ASCII only.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[\\x20-\\x7E]+$"
+    },
+    "version": {
+      "description": "Resource version, for example a revision number, commit SHA, or content hash. Empty when the gear does not version the resource. An approval of one version never covers another.",
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^[\\x20-\\x7E]*$",
+      "default": ""
+    },
+    "display_name": {
+      "description": "Human-readable name shown to administrators and approvers. Updated on re-registration.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    }
+  },
+  "required": [
+    "resource_tenant_id",
+    "resource_id",
+    "version",
+    "display_name"
+  ],
+  "x-gts-abstract": true
+}

@@ -1,0 +1,28 @@
+error: `label` is not a Fact of this type
+  --> tests/ui/fail_replaces_unknown.rs:13:35
+   |
+13 | #[governed_facts(replaces(title = "label"))]
+   |                                   ^^^^^^^
+
+warning: unused import: `FactValue`
+ --> tests/ui/fail_replaces_unknown.rs:1:32
+  |
+1 | use operation_governance_sdk::{FactValue, GovernedFacts, GovernedOperationV1};
+  |                                ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no associated function or constant named `og_traits` found for struct `CreateWidgetV2` in the current scope
+  --> tests/ui/fail_replaces_unknown.rs:10:30
+   |
+10 |     traits = CreateWidgetV2::og_traits()
+   |                              ^^^^^^^^^ associated function or constant not found in `CreateWidgetV2`
+...
+14 | pub struct CreateWidgetV2 {
+   | ------------------------- associated function or constant `og_traits` not found for this struct
+   |
+help: there is an associated function `gts_traits` with a similar name
+   |
+10 -     traits = CreateWidgetV2::og_traits()
+10 +     traits = CreateWidgetV2::gts_traits()
+   |

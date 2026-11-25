@@ -6,6 +6,24 @@ decision-makers: Constructor Fabric Steering Committee
 
 # Use Separate AuthN Resolver and AuthZ Resolver
 
+**ID**: `cpt-cf-authorization-adr-split-authn-authz-resolvers`
+
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Unified Auth Resolver](#option-a-unified-auth-resolver)
+  - [Option B: Separate AuthN Resolver and AuthZ Resolver](#option-b-separate-authn-resolver-and-authz-resolver)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 ## Context and Problem Statement
 
 Gears require integration with vendor-specific identity and authorization infrastructure. This integration involves two distinct concerns:
@@ -99,6 +117,10 @@ Chosen option: **Option B - Separate AuthN Resolver and AuthZ Resolver**, becaus
 
 - **No latency overhead** — AuthN and AuthZ are inherently separate steps in the request flow; having separate resolvers doesn't add network hops compared to unified approach (both require AuthN before AuthZ)
 - **Token passthrough** — SecurityContext will include `bearer_token` field for passing token from AuthN to AuthZ when needed
+
+### Confirmation
+
+Verify that the authentication resolver produces the security context and that the authorization resolver evaluates permissions through its separate interface.
 
 ## Pros and Cons of the Options
 

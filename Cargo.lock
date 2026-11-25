@@ -3667,6 +3667,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-og-rego-config-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cf-gears-operation-governance-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-policy-evaluation",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "inventory",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-oidc-authn-plugin"
 version = "0.2.13"
 dependencies = [
@@ -3703,6 +3725,39 @@ dependencies = [
  "tokio-retry",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-operation-governance-macros"
+version = "0.1.0"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "cf-gears-operation-governance-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cf-gears-operation-governance-macros",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry-sdk",
+ "gts",
+ "jsonschema 0.40.2",
+ "parking_lot",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "trybuild",
  "uuid",
 ]
 
@@ -9556,6 +9611,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "object-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "cf-gears-authz-resolver",
+ "cf-gears-authz-resolver-sdk",
+ "cf-gears-og-rego-config-plugin",
+ "cf-gears-operation-governance-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-db",
+ "cf-gears-toolkit-db-macros",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry",
+ "inventory",
+ "object-storage-sdk",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "object-storage-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cf-gears-operation-governance-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
+ "gts",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "object-storage-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cf-gears-api-gateway",
+ "cf-gears-authn-resolver",
+ "cf-gears-authz-resolver",
+ "cf-gears-grpc-hub",
+ "cf-gears-og-rego-config-plugin",
+ "cf-gears-single-tenant-tr-plugin",
+ "cf-gears-static-authn-plugin",
+ "cf-gears-static-authz-plugin",
+ "cf-gears-tenant-resolver",
+ "cf-gears-toolkit",
+ "cf-gears-types-registry",
+ "clap",
+ "object-storage",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

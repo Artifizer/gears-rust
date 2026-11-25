@@ -1,0 +1,6 @@
+{
+  "id": "gts.cf.toolkit.authz.permission.v1~cf.approval_service._.projection_deregister.v1",
+  "resource_type": "gts.cf.core.approval.projection.v1~",
+  "action": "deregister",
+  "display_name": "Deregister resource projections of owned projection types"
+}

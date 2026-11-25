@@ -53,7 +53,7 @@ description: "Product requirements for the Approval Service gear: synchronous ap
 
 ### 1.1 Purpose
 
-The Approval Service answers one question synchronously for any gear: may this subject perform this operation on this resource now? Gears call it on every protected request, through an SDK with a client-side cache, and receive a verdict. The service owns approval governance: the catalog of approvable resources, the rules that decide whether approval is required, the approval policies that say who must approve, the auto-approval rules that approve without human review, the decisions approvers record, the pending approval requests, and the audit of all of it.
+The Approval Service answers one question synchronously: may this subject perform this operation on this resource now? It is the Approval Stage of [Operation Governance](../../../docs/arch/operation-governance/PRD.md): the governance gate (`admission-control`) calls it on every governed request, after the Guardrail Stage, and gears reach it through their Governance Enforcer, which caches allowed outcomes within the approval lease. Terms such as Governed Operation, Governance Stage, Governance Enforcer, and Applicability Snapshot are defined in the [Operation Governance glossary](../../../docs/arch/operation-governance/PRD.md#14-glossary). The service owns approval governance: the catalog of approvable resources, the rules that decide whether approval is required, the approval policies that say who must approve, the auto-approval rules that approve without human review, the decisions approvers record, the pending approval requests, and the audit of all of it.
 
 The service never executes, orchestrates, or waits for the protected operation. When a gear needs to wait for an approval, it handles the waiting itself, by polling the verdict or by reacting to the service's change events.
 
@@ -67,7 +67,7 @@ Platform vendors assemble gears into products and must decide which gear operati
 
 ### 1.3 Goals (Business Outcomes)
 
-- A gear adds an approval gate with one SDK call per protected request and no approval logic of its own.
+- A gear adds an approval gate with no approval logic of its own: its Governance Enforcer makes one Governance Check per protected request, and the gate calls this service.
 - A platform vendor sets approval defaults for a product through approval service configuration file only, with no gear code changes.
 - A tenant administrator defines who approves what, and which requests approve automatically, without redeploying anything.
 - Every verdict is explainable: it names the rule, policy, auto-approval rule, or decision that produced it.
@@ -85,8 +85,8 @@ Platform vendors assemble gears into products and must decide which gear operati
 | Requester | The authenticated identity on whose behalf the client gear made the verification call that opened a request. It can differ from the subject, for example when the subject is a tenant. |
 | Subject Tenant | The tenant of the subject. Verdict resolution walks the tenant hierarchy from the subject tenant upward. |
 | Scope Tenant | The tenant at which a rule, policy, auto-approval rule, or decision is recorded. Rules, policies, and auto-approval rules apply to that tenant and its descendants; a decision applies to its subject. |
-| Context Attributes | Values the gear passes on a verification call, as declared by the opportunity, for example an order amount or a list of changed paths. Used in conditions and shown to approvers. |
-| Context Fingerprint | A digest of the context attributes of a verification call. A request and the approve decisions recorded against it are bound to the fingerprint of the request. |
+| Context Attributes | Values the gear passes on a verification call: the Facts of the opportunity's Governed Operation type, for example an order amount or a list of changed paths. Used in conditions and shown to approvers. |
+| Context Fingerprint | A SHA-256 digest of the opportunity type without its version and the values of the binding context attributes that this service's applicable conditions read or that approvers see. Attributes that only other Governance Stages read never change it. A request and the approve decisions recorded against it are bound to the fingerprint of the request. |
 | Rule | A firewall-style statement that maps an opportunity pattern and a resource selector to an action: `deny`, `require_approval`, or `not_required`. |
 | Rule Layer | The source of a rule: approval opportunity defined default value, approval service configuration file, or runtime rule stored in the service. |
 | Approval Policy | A statement of what approval must consist of: a minimum number of approvals, mandatory approvers, and optionally a narrowed list of approvers, for an opportunity pattern and resource selector, optionally with a condition. |
@@ -150,8 +150,15 @@ BSS gears (Pricing, Products, Orders Workflow) use the embedded library `cf-gear
 
 **ID**: `cpt-cf-approval-service-actor-integrated-gear`
 
-- **Role**: Registers opportunities and resource projections, and asks for a verdict before each protected operation.
+- **Role**: Registers opportunities and resource projections. Before each protected operation, its Governance Enforcer asks the governance gate, which asks this service for the verdict.
 - **Needs**: A low-latency, fail-closed verdict that cannot be bypassed by stale cache entries beyond a bounded delay.
+
+#### Governance Gate
+
+**ID**: `cpt-cf-approval-service-actor-governance-gate`
+
+- **Role**: `admission-control`. Calls verification as the Approval Stage (`GovernanceStagePluginClientV1`), last in order, with the register option in enforce mode and without it in a Preview, and reads applicability reports.
+- **Needs**: A fail-closed verdict with obligations (request reference, unmet requirements, approval lease) and an applicability report per opportunity and tenant scope.
 
 #### Group Source
 
@@ -165,9 +172,9 @@ Platform runtime, architecture, and baselines are defined in [ARCHITECTURE_MANIF
 
 1. A gear registers its approval opportunities, each with its accepted projection types, subject types, context attributes, and default action.
 2. A platform vendor and approval service operator adds configuration rules and policies in the approval service config file. Tenant administrators add runtime rules, policies, and auto-approval rules.
-3. On every protected request, the gear asks for a verdict for (opportunity, subject, resource projection, context attributes), optionally asking the service to register the projection and raise an approval request.
+3. On every protected request that the Applicability Snapshot marks as governed, the governance gate asks, on the gear's behalf, for a verdict for (opportunity, subject, resource projection, context attributes), with the register option in enforce mode so that the service can register the projection and raise an approval request.
 4. The service resolves the effective rule and, when approval is required, the deny decisions, auto-approval rules, applicable policies, and approve decisions, and returns the verdict.
-5. Approvers see the requests they may decide and record decisions. The next verdict reflects them, subject to the bounded SDK cache delay.
+5. Approvers see the requests they may decide and record decisions. The next verdict reflects them, subject to the approval lease of cached allowed outcomes.
 
 The service **MUST NOT** perform, orchestrate, or wait for the protected operation, and **MUST NOT** act as an authorization data source.
 
@@ -175,9 +182,9 @@ The service **MUST NOT** perform, orchestrate, or wait for the protected operati
 
 ### 4.1 In Scope
 
-- **p1**: opportunity registration with mandatory default action, mandatory standing approval setting, context attributes, and decision authority; resource projections; subjects; layered firewall-style rules; separate check and approve permissions; live approval policies with minimum approvals, mandatory approvers, and narrowed approver lists; decisions with mandatory reason and separation of duties; approval requests raised by verification, bound to context fingerprints; request reconciliation; synchronous explainable verification and batch verification; correlation ID and decision reasons in verdicts; approval leases; SDK with bounded cache; tenant hierarchy; administrator browsing and approver inbox; bulk decisions; audit trail; durable change and request events; refusal and denial reasons; self-managed tenant barriers.
+- **p1**: opportunity registration with mandatory default action, mandatory standing approval setting, context attributes taken from the named Governed Operation type, and decision authority; resource projections; subjects; layered firewall-style rules; separate check and approve permissions; live approval policies with minimum approvals, mandatory approvers, and narrowed approver lists; decisions with mandatory reason and separation of duties; approval requests raised by verification, bound to context fingerprints; request reconciliation; synchronous explainable verification and batch verification, served as the Approval Stage of the governance gate; applicability reports; correlation ID and decision reasons in verdicts; approval leases; SDK for request reads and events; tenant hierarchy; administrator browsing and approver inbox; bulk decisions; audit trail; durable change and request events; refusal and denial reasons; self-managed tenant barriers.
 - **p2**: auto-approval rules; conditional policies; staged policies; group approvers; policy snapshot per request; subject-type selectors on rules; request escalation; decisions on behalf of an approver; subject group decisions; decision expiry; access review report; governance versions with drafts, comparison, and rollback; approver exclusions.
-- **p3**: periodic recertification campaigns; delegable (overridable) ancestor rules; second-administrator review of governance changes; trial mode and previews of governance changes.
+- **p3**: periodic recertification campaigns; delegable (overridable) ancestor and platform rules; second-administrator review of governance changes; trial mode and previews of governance changes.
 
 ### 4.2 Out of Scope
 
@@ -189,7 +196,8 @@ The service **MUST NOT** perform, orchestrate, or wait for the protected operati
 - Notification delivery, reminders, and escalation timers.
 - Delegation and proxy approvals.
 - Electronic signatures on decisions.
-- Admitting several operations as one all-or-nothing unit, and the behaviour of a product without this service; the platform admission gate and the gear own both.
+- Admitting several operations as one all-or-nothing unit, and the behaviour of a product without this service; the governance gate and the gear own both.
+- Ordering approval after other governance checks, and caching outcomes in gears: the governance gate and the Governance Enforcer own both.
 
 ### 4.3 Future Scope
 
@@ -211,9 +219,9 @@ Candidates without a committed priority:
 
 - [ ] `p1` - **ID**: `cpt-cf-approval-service-fr-register-req-type`
 
-The system **MUST** let a gear register approval opportunities as GTS types. Each opportunity **MUST** declare its accepted projection types, its accepted subject types, its context attributes (possibly none), its decision authority (subject tenant by default, or resource tenant), whether standing approvals are `allowed` or `prohibited`, and exactly one default action (`deny`, `require_approval`, or `not_required`). Registration without a default action or without the standing approval setting **MUST** be rejected. When an update changes the setting to `prohibited`, existing standing approvals for the opportunity **MUST** stop applying.
+The system **MUST** let a gear register approval opportunities as GTS types. Each opportunity **MUST** name one Governed Operation family (its type ID without the version) of `admission-control` that the same gear owns, through its required `governed_operation` trait; at most one opportunity **MUST** exist per family ([Operation Governance ADR 0002](../../../docs/arch/operation-governance/ADR/0002-cpt-cf-operation-governance-adr-fact-collection.md)). Its context attributes are the Facts of the family's current version, with their Fact Tier and their approver-visible, sensitive, and binding traits; the gear declares them only there. Each opportunity **MUST** declare its accepted projection types, which projection type each resource type of its Governed Operation maps to (`resource_projections`), its accepted subject types, its decision authority (subject tenant by default, or resource tenant), whether standing approvals are `allowed` or `prohibited`, and exactly one default action (`deny`, `require_approval`, or `not_required`). Registration without a default action or without the standing approval setting **MUST** be rejected. When an update changes the setting to `prohibited`, existing standing approvals for the opportunity **MUST** stop applying.
 
-The system **MUST** let only the owning gear's service identity register or update its opportunities. Administrators **MUST** be able to see each opportunity's default action. An update that removes or renames a declared context attribute **MUST** be rejected unless the opportunity moves to a new major version, and a rule or policy that refers to an attribute the opportunity no longer declares **MUST** make verification return `invalid`, never let the operation proceed.
+The system **MUST** let only the owning gear's service identity register or update its opportunities. Administrators **MUST** be able to see each opportunity's default action. The default action applies only when no rule and no platform default matches (`cpt-cf-approval-service-fr-rule-layers`); a tenant rule replaces it. Context attributes change only with a new version of the Governed Operation type, under its rules: a renamed attribute stays readable under its old name, and a rule or policy that refers to an attribute the type no longer declares **MUST** make verification return `invalid`, never let the operation proceed.
 
 - **Rationale**: A mandatory default makes every verdict resolvable without any hard-coded fallback. A mandatory standing approval setting makes gear vendors decide whether an approval may outlive the facts of a request: acceptable for `repo.read`, not for `po.release`.
 - **Actors**: `cpt-cf-approval-service-actor-gear-vendor`, `cpt-cf-approval-service-actor-integrated-gear`
@@ -250,9 +258,9 @@ Subject records **MUST** hold identifiers only.
 
 - [ ] `p1` - **ID**: `cpt-cf-approval-service-fr-context-attributes`
 
-The system **MUST** accept context attributes on a verification call and **MUST** validate them against the opportunity's declaration; a mismatch returns `invalid`. Context attributes **MUST** be stored only with the approval request they open, shown to its approvers, and recorded in audit. They **MUST NOT** be stored on the projection.
+The system **MUST** accept context attributes on a verification call and **MUST** validate them against the opportunity's declaration; a mismatch returns `invalid`. Context attributes **MUST** be stored only with the approval request they open and recorded in audit. Only attributes declared as shown to approvers **MUST** be shown to its approvers. They **MUST NOT** be stored on the projection.
 
-The system **MUST** bind every request, and every approve decision recorded against it, to the request's context fingerprint; deny decisions and standing approvals are unbound. A request or bound decision whose fingerprint differs from the call's **MUST** be inapplicable, and the verdict follows normal precedence (`cpt-cf-approval-service-fr-verdict-resolution`); if approval is still required and unsatisfied, the outcome is `approval_required` with reason `context_changed`. With the register option, the mismatched request **MUST** close with `context_changed`, and a new one opens only if approval is still required and unsatisfied.
+The system **MUST** bind every request, and every approve decision recorded against it, to the request's context fingerprint; deny decisions and standing approvals are unbound. The fingerprint covers only binding attributes that applicable conditions of this service read or that approvers see; attributes declared as not binding, and attributes that only other Governance Stages read, do not change it. A request or bound decision whose fingerprint differs from the call's **MUST** be inapplicable, and the verdict follows normal precedence (`cpt-cf-approval-service-fr-verdict-resolution`); if approval is still required and unsatisfied, the outcome is `approval_required` with reason `context_changed`. With the register option, the mismatched request **MUST** close with `context_changed`, and a new one opens only if approval is still required and unsatisfied.
 
 - **Rationale**: Approvers need the facts of a request, such as an order amount, and conditions need values to evaluate, without the service mirroring gear data.
 - **Actors**: `cpt-cf-approval-service-actor-integrated-gear`, `cpt-cf-approval-service-actor-approver`
@@ -274,17 +282,24 @@ Administrators **MUST** be able to create, change, and delete runtime rules. Eve
 
 - [ ] `p1` - **ID**: `cpt-cf-approval-service-fr-rule-layers`
 
-The root tenant has three rule layers: runtime rules, approval service configuration file rules, and gear defaults (from opportunity registration). Descendant tenants **MUST** have runtime rules only.
+Rules and defaults come from four sources:
 
-The system **MUST** apply the layers one by one, in this order:
+- **Platform rules**: rules in the approval service configuration file. They bind every tenant, the root and self-managed tenants included, as if set above the root.
+- **Tenant rules**: runtime rules of a tenant. They bind that tenant and its descendants, up to a self-managed barrier (`cpt-cf-approval-service-fr-tenant-barriers`).
+- **Platform default**: an optional default action per opportunity pattern in the configuration file.
+- **Gear default**: the mandatory default action of the opportunity (`cpt-cf-approval-service-fr-register-req-type`).
 
-1. Runtime rules (existing in approval service database). If at least one matches, the most specific matching runtime rule decides, and the next layers are not checked.
-2. Configuration file rules, only if no runtime rule matches. If at least one matches, the most specific one decides.
-3. The gear default, only if no rule of the previous layers matches. It matches every projection type the opportunity accepts, so a decision always exists.
+The system **MUST** decide the effective action in this order:
 
-Layers **MUST** be read at verification time and **MUST NOT** be copied into one another. Deleting a runtime rule **MUST** restore the effect of the configuration and gear layers.
+1. If a platform rule or a rule of any ancestor of the subject tenant, up to the root, selects `deny` or `require_approval`, the strictest of them decides: `deny`, then `require_approval`.
+2. Otherwise, if the subject tenant has a matching rule, its most specific matching rule decides, whatever its action.
+3. Otherwise, if a platform rule or an ancestor rule selects `not_required`, the action is `not_required`.
+4. Otherwise the platform default decides, if one matches.
+5. Otherwise the gear default decides.
 
-- **Rationale**: Gear upgrades and product configuration changes take effect without data migration, and runtime changes are reversible.
+At every level the most specific matching rule is the one selected. Defaults are starting points, not rules: a tenant rule replaces them. Sources **MUST** be read at verification time and **MUST NOT** be copied into one another. Deleting a tenant rule **MUST** restore the effect of the remaining rules and defaults.
+
+- **Rationale**: Ancestors and the platform can always restrict, never be loosened by a child; within those limits a tenant governs itself; product defaults apply only where nobody has decided. Gear upgrades and configuration changes take effect without data migration.
 - **Actors**: `cpt-cf-approval-service-actor-gear-vendor`, `cpt-cf-approval-service-actor-platform-vendor`, `cpt-cf-approval-service-actor-admin`
 
 #### Approval Policies
@@ -482,6 +497,10 @@ The system **MUST** let a holder of the approve permission record decisions for 
 
 The system **MUST** expose a synchronous verification call taking an opportunity, a subject, a resource projection, context attributes, and an optional register option. Without the register option the call **MUST** be read-only.
 
+The system **MUST** serve verification as the Approval Stage of the governance gate ([Operation Governance ADR 0001](../../../docs/arch/operation-governance/ADR/0001-cpt-cf-operation-governance-adr-governance-gate.md)): it registers a `GovernanceStagePluginClientV1` instance of kind `approval`, last in order, with side effects and Preview support. An enforce evaluation is verification with the register option; a Preview evaluation is verification without it, and a Preview over many resources is batch verification. The verdict, the open request, the unmet requirements, and the approval lease are returned to the gate as stage result and obligations.
+
+The stage **MUST** build the verification call from the Governance Check alone, so gears pass no approval-specific data: the opportunity is the one registered for the check's Governed Operation family; the subject comes from the `SecurityContext`; the projection type comes from the opportunity's `resource_projections` trait for the check's resource type, and the projection ID, tenant, and version are the check's resource ID, tenant, and Resource Version; the context attributes are the check's Facts. When no opportunity exists for the family, the verdict **MUST** be `not_required`. When the opportunity maps no projection type for the resource type, the verdict **MUST** be `invalid`.
+
 Verification **MUST** return one of these outcomes, each with a machine-readable reason code:
 
 | Outcome | `mayProceed` | Meaning |
@@ -496,8 +515,8 @@ Verification **MUST** return one of these outcomes, each with a machine-readable
 
 Every verdict **MUST** identify what produced it: the rule (with layer and scope tenant), the auto-approval rule, or the decisions (with approver and time), and for `pending` the open request and its unmet policy requirements. Every `approved` and `not_required` verdict **MUST** carry an approval lease (`cpt-cf-approval-service-fr-approval-lease`). Every verdict **MUST** carry a version that increases monotonically whenever a change affecting it is committed, so callers can reject results older than one they have seen.
 
-- **Rationale**: Verification is the only runtime integration point for gears and must be explainable to administrators, approvers, and users.
-- **Actors**: `cpt-cf-approval-service-actor-integrated-gear`, `cpt-cf-approval-service-actor-requester`
+- **Rationale**: Verification is the only runtime decision point of this service and must be explainable to administrators, approvers, and users.
+- **Actors**: `cpt-cf-approval-service-actor-governance-gate`, `cpt-cf-approval-service-actor-integrated-gear`, `cpt-cf-approval-service-actor-requester`
 - **Covers**: `cpt-cf-approval-service-upreq-query-status`, `cpt-cf-approval-service-upreq-requirement-verdict`
 
 #### Batch Verification
@@ -528,7 +547,7 @@ Every verdict that does not let the operation proceed **MUST** carry a reason ca
 
 | Category | Meaning |
 |----------|---------|
-| `no_permission` | The caller lacks the permission for the call, for example the check or request permission |
+| `no_permission` | The caller lacks the permission for the call, for example the check or request permission. Returned as a permission error with this reason code, not as a verdict |
 | `blocked_by_rule` | A `deny` rule applies; the verdict names the rule |
 | `denied_by_approver` | An applicable deny decision exists; the verdict carries the approver's reason |
 | `approval_missing` | Approval is required and not yet satisfied; the verdict names the unmet requirements |
@@ -561,7 +580,7 @@ A lease is not a grant: changes take effect in the service when committed, and o
 The system **MUST** resolve a verdict as follows:
 
 1. **Validate**: an unknown opportunity, an unaccepted type, or invalid context attributes return `invalid`.
-2. **Effective action**: for each tenant from the subject tenant up to the root, select one rule at that level, checking layers one by one (`cpt-cf-approval-service-fr-rule-layers`): runtime rules first; at the root, configuration rules only if no runtime rule matches, then the gear default. A descendant level without a matching runtime rule selects nothing. Within a layer, the most specific matching rule wins: the resource selector is compared first, then the opportunity pattern; a specific projection is more specific than any type pattern, and a narrower GTS pattern is more specific than a wider one. On a tie, the stricter action wins. Across tenant levels, the strictest selected action wins: `deny`, then `require_approval`, then `not_required`.
+2. **Effective action**: as defined in `cpt-cf-approval-service-fr-rule-layers`. Within one tenant level, the most specific matching rule wins: the resource selector is compared first, then the opportunity pattern; a specific projection is more specific than any type pattern, and a narrower GTS pattern is more specific than a wider one. On a tie, the stricter action wins.
 3. **Action**: `deny` returns `denied`; `not_required` returns `not_required`.
 4. For `require_approval`, using the applicable decisions (those on the subject itself and those on any tenant subject on the subject tenant's path to the root):
    1. Any applicable active deny decision returns `denied`.
@@ -571,7 +590,7 @@ The system **MUST** resolve a verdict as follows:
 
 A context mismatch **MUST NOT** change this order. An approval recorded at the subject tenant **MUST** be able to satisfy a `require_approval` rule set by an ancestor. Decisions and auto-approval **MUST NOT** override a `deny` rule.
 
-- **Rationale**: One deterministic order makes verdicts predictable and explainable. Within a tenant, specific exceptions work as in a firewall; across tenants, descendants can only restrict.
+- **Rationale**: One deterministic order makes verdicts predictable and explainable. Within a tenant, specific exceptions work as in a firewall; ancestors and the platform can only be made stricter by descendants.
 - **Actors**: `cpt-cf-approval-service-actor-integrated-gear`, `cpt-cf-approval-service-actor-admin`
 - **Covers**: `cpt-cf-approval-service-upreq-tenant-hierarchy`, `cpt-cf-approval-service-upreq-query-status`
 
@@ -589,10 +608,19 @@ The system **MUST** apply the tenant hierarchy on every verification: ancestor r
 
 - [ ] `p1` - **ID**: `cpt-cf-approval-service-fr-tenant-barriers`
 
-Ancestor runtime rules, policies, auto-approval restrictions, decisions on tenant subjects, and decision authority **MUST NOT** reach across a self-managed tenant barrier. Configuration file rules and policies **MUST** apply to every tenant, including self-managed ones. Administrators and approvers of an ancestor **MUST NOT** see or decide the requests of a tenant behind a barrier. A change of a tenant's managed or self-managed mode **MUST** take effect from the next verification.
+Ancestor runtime rules, policies, auto-approval restrictions, decisions on tenant subjects, and decision authority **MUST NOT** reach across a self-managed tenant barrier. Platform rules, platform defaults, and configuration file policies **MUST** apply to every tenant, including self-managed ones. Administrators and approvers of an ancestor **MUST NOT** see or decide the requests of a tenant behind a barrier. A change of a tenant's managed or self-managed mode **MUST** take effect from the next verification.
 
 - **Rationale**: A self-managed tenant operates independently of its parent; only platform-wide rules apply everywhere.
 - **Actors**: `cpt-cf-approval-service-actor-platform-vendor`, `cpt-cf-approval-service-actor-admin`
+
+#### Applicability Report
+
+- [ ] `p1` - **ID**: `cpt-cf-approval-service-fr-applicability`
+
+The system **MUST** report to the governance gate, per opportunity and tenant scope, whether verification there can return anything other than `not_required` (any rule, platform default, or gear default other than `not_required`, or any deny decision), and which context attributes it needs: those that the conditions of applicable rules, policies, and auto-approval rules read, and those that approvers see when approval can be required. Conditions are parsed when saved, so the set is exact. Every committed change that alters a report **MUST** increase the applicability version and publish a change event.
+
+- **Rationale**: Gears must pay nothing for operations that no approval rule governs, and load only the context attributes that are read ([Operation Governance ADR 0002](../../../docs/arch/operation-governance/ADR/0002-cpt-cf-operation-governance-adr-fact-collection.md)).
+- **Actors**: `cpt-cf-approval-service-actor-governance-gate`
 
 ### 5.5 Administration and Audit
 
@@ -701,7 +729,7 @@ The system **MUST** let administrators run campaigns in which reviewers confirm 
 
 - [ ] `p3` - **ID**: `cpt-cf-approval-service-fr-delegable-rules`
 
-The system **MUST** let an ancestor mark a rule as overridable, so that descendant runtime rules can relax it.
+The system **MUST** let an ancestor or the platform mark a rule as overridable, so that descendant tenant rules can relax it.
 
 - **Rationale**: Some platforms delegate governance to child tenants.
 - **Actors**: `cpt-cf-approval-service-actor-admin`
@@ -737,7 +765,7 @@ The system **MUST** sustain 1,000 verification calls per second on average, serv
 
 - [ ] `p1` - **ID**: `cpt-cf-approval-service-nfr-revocation-delay`
 
-The SDK **MUST** cache only `approved` and `not_required` verdicts, keyed by every verification input including the context fingerprint, and only until the verdict's approval lease ends. Calls with the register option **MUST NOT** be served from the cache. A revoked decision, a new deny, a stricter rule or policy, or a disabled auto-approval rule **MUST** therefore take effect for SDK callers no later than the end of the lease. Callers **MUST** be able to bypass the cache for a single call.
+Callers, the Governance Enforcer included, **MUST** cache only `approved` and `not_required` verdicts (Allowed outcomes), keyed by every verification input including the context fingerprint, and only until the verdict's approval lease ends. Calls with the register option **MUST NOT** be served from the cache. A revoked decision, a new deny, a stricter rule or policy, or a disabled auto-approval rule **MUST** therefore take effect for callers no later than the end of the lease. Callers **MUST** be able to bypass the cache for a single call.
 
 - **Threshold**: At most the approval lease; default set in configuration.
 - **Rationale**: Caching must never let a revoked approval live on indefinitely.
@@ -768,7 +796,7 @@ Request reconciliation (`cpt-cf-approval-service-fr-request-reconciliation`) **M
 
 - [ ] `p1` - **ID**: `cpt-cf-approval-service-nfr-availability`
 
-Verification **MUST** return `unavailable` with `mayProceed = false` whenever the verdict cannot be established reliably, including when the Group Source cannot answer. The SDK **MUST** treat any error as refusal, except that a cached verdict within its approval lease **MUST** remain usable. The availability target is an open question (§13).
+Verification **MUST** return `unavailable` with `mayProceed = false` whenever the verdict cannot be established reliably, including when the Group Source cannot answer. The Approval Stage adapter, the gate, and the SDK **MUST** treat any error as refusal, except that a cached verdict within its approval lease **MUST** remain usable. The availability target is an open question (§13).
 
 - **Threshold**: Zero `mayProceed = true` results on dependency failure other than cached verdicts within their lease.
 - **Rationale**: An approval gate that fails open is no gate.
@@ -803,7 +831,7 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 
 - **Type**: Rust gear client (ClientHub)
 - **Stability**: stable
-- **Description**: One call returns the verdict and `mayProceed`, with context attributes, the register option, a correlation ID, batch verification, a client-side cache bounded by the approval lease, a per-call cache bypass, and fail-closed error handling. Gears keep no approval logic.
+- **Description**: Request reads by ID, event types, administration, and the verification call used by the Approval Stage adapter: one call returns the verdict and `mayProceed`, with context attributes, the register option, a correlation ID, batch verification, and fail-closed error handling. Gears reach verification through the governance gate and keep no approval logic.
 - **Breaking Change Policy**: Major version bump required.
 
 ### 7.2 External Integration Contracts
@@ -815,6 +843,14 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 - **Direction**: provided by library
 - **Protocol/Format**: Verification request and verdict as defined in `cpt-cf-approval-service-fr-verify-approval`.
 - **Compatibility**: New outcomes only in a new major version; callers treat unknown outcomes as refusal.
+
+#### Approval Stage Contract
+
+- [ ] `p1` - **ID**: `cpt-cf-approval-service-contract-approval-stage`
+
+- **Direction**: provided to `admission-control`
+- **Protocol/Format**: `GovernanceStagePluginClientV1` (`evaluate`, `applicability`) of the `admission-control` SDK, registered as a GTS stage plugin instance; in-process or over its REST or gRPC projection.
+- **Compatibility**: Governed by the `admission-control` SDK version.
 
 #### Change Event Contract
 
@@ -844,11 +880,11 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 - The gear registered the opportunity with default action `require_approval`; no policy applies.
 
 **Main Flow**:
-1. The user attempts the operation; the gear verifies with the register option.
+1. The user attempts the operation; the gear checks it through the governance gate, which verifies with the register option.
 2. The service registers the projection, opens a request, publishes a request event, and returns `pending`.
 3. The gear refuses the operation and tells the user that approval was requested, or waits for the request event.
 4. A holder of the approve permission sees the request in their inbox and approves with a reason.
-5. The user retries, or the waiting gear wakes on the request-closed event; the gear verifies and receives `approved`.
+5. The user retries, or the waiting gear wakes on the request-closed event; the gear checks again and receives Allowed (`approved`).
 
 **Postconditions**:
 - The request is closed; the decision and request history are audited.
@@ -893,7 +929,7 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 - A policy for `pr.merge` on repository pull requests requires two approvals with the repository owner mandatory. Repository reviewers hold the approve permission for `pr.merge` on that repository.
 
 **Main Flow**:
-1. The gear verifies the merge with the register option; the service opens a request and returns `pending` with the unmet requirements.
+1. The gear checks the merge through the governance gate, which verifies with the register option; the service opens a request and returns `pending` with the unmet requirements.
 2. Two reviewers approve; the verdict stays `pending` because the repository owner has not approved.
 3. The repository owner approves; the next verification returns `approved`.
 
@@ -944,9 +980,9 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 - Repository maintainers hold the approve permission for both; team leads hold it for `repo.read` only.
 
 **Main Flow**:
-1. A user opens the repository; the gear verifies `repo.read` with the register option and receives `pending`.
+1. A user opens the repository; the gear checks `repo.read` through the governance gate and receives Approval pending (`pending`).
 2. A team lead approves read access; the user can read.
-3. The user pushes; the gear verifies `repo.write` and receives `pending`.
+3. The user pushes; the gear checks `repo.write` and receives Approval pending.
 4. A team lead cannot approve write access; a maintainer approves it.
 
 **Postconditions**:
@@ -966,7 +1002,7 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 - A gear registered opportunity `task.execute`; its worker runs tasks in Task Engine and holds the Event Broker `consume` permission on request events for that opportunity.
 
 **Main Flow**:
-1. The worker verifies with the register option and receives `pending` with the request ID.
+1. The worker checks the operation through the governance gate and receives Approval pending with the request ID.
 2. The worker arms a Task Engine event wait on the request event type, with the opportunity type as subject type and the request ID as subject ID, and parks the task.
 3. An approver decides; the request closes and its closed event is published in the task's tenant.
 4. Task Engine resumes the task with the event header; the worker reads the request outcome by ID and continues or stops.
@@ -989,7 +1025,7 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 - A staged policy requires finance, then legal, and names a sales director as escalation recipient.
 
 **Main Flow**:
-1. On order submission, Workflow verifies with the register option and its correlation ID; it reflects `approved` or, on `pending`, `pending_approval` into Orders Lifecycle.
+1. On order submission, Workflow checks the operation through the governance gate with its correlation ID; it reflects `approved` or, on `pending`, `pending_approval` into Orders Lifecycle.
 2. Finance approves; the verdict stays `pending` with legal as the current stage.
 3. Workflow's 72-hour timer fires; Workflow escalates the request, and the request-escalated event names the sales director.
 4. Legal approves; the request closes and its event carries the outcome, the decision reasons, and the correlation ID.
@@ -1005,15 +1041,16 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 
 ## 9. Acceptance Criteria
 
-- [ ] A gear gates an operation with one SDK call and no approval logic.
+- [ ] A gear gates an operation with one Governance Check through its Governance Enforcer and no approval logic.
+- [ ] A governance change that makes an opportunity governed for a tenant increases the applicability version and is reported with the context attributes it reads.
 - [ ] Registering an opportunity without a default action or without a standing approval setting is rejected.
 - [ ] For an opportunity that prohibits standing approvals, an approve decision or bulk approve item without an open request is rejected, and existing standing approvals stop applying when the setting changes to prohibited.
 - [ ] A gear cannot register opportunities or projections for types it does not own.
 - [ ] A verification with the register option opens at most one request per (opportunity, projection, subject) and records the requester and context attributes.
 - [ ] A verification without the register option changes nothing.
 - [ ] Unknown opportunities, unaccepted types, and invalid context attributes return `invalid` with distinct reason codes.
-- [ ] Within one tenant level, layers are checked one by one (runtime, configuration, gear default) and the first layer with a matching rule decides, by its most specific rule; across levels, the strictest action wins.
-- [ ] Deleting a runtime rule restores the configuration or gear default result.
+- [ ] Platform rules and ancestor rules that select `deny` or `require_approval` win; otherwise the subject tenant's most specific rule decides; otherwise an ancestor or platform `not_required`; otherwise the platform default; otherwise the gear default.
+- [ ] A tenant rule replaces the platform and gear defaults, but never loosens a platform or ancestor rule; deleting it restores the remaining rules and defaults.
 - [ ] The check permission does not allow deciding; any holder of the approve permission for the opportunity can decide.
 - [ ] A policy is satisfied only with the minimum number of distinct counting approvals and every mandatory approver.
 - [ ] Every applicable policy of the subject tenant and its ancestors must be satisfied.
@@ -1034,7 +1071,7 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 - [ ] Request events are published in the subject tenant with the opportunity GTS type as subject type and the request ID as subject ID.
 - [ ] Decisions and requests of a deregistered projection stay archived after re-registration.
 - [ ] A bulk decision with one failing item records nothing and reports each item's reason.
-- [ ] A revocation takes effect for SDK callers no later than the end of the approval lease.
+- [ ] A revocation takes effect for callers no later than the end of the approval lease.
 - [ ] A verdict lease never exceeds the configured maximum or an applicable policy's maximum; with two mandatory approvers who set 60 seconds and 10 minutes, the lease is 60 seconds.
 - [ ] A changed context fingerprint closes the open request with `context_changed`, and approvals bound to the old fingerprint stop applying.
 - [ ] With a changed context fingerprint, `deny` and `not_required` rules still win; `context_changed` is returned only when approval is still required and unsatisfied.
@@ -1074,7 +1111,7 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| The service is on the hot path of every protected request | HIGH — an outage blocks all gated operations | Fail closed, SDK cache, availability target (§13) |
+| The service is on the hot path of every protected request | HIGH — an outage blocks all gated operations | Fail closed, lease-bounded cache in the Governance Enforcer, ungoverned operations never call it, availability target (§13) |
 | Rule, policy, and auto-approval precedence is misunderstood | MEDIUM — unexpected denials or approvals | Explainable verdicts naming what produced them; side-effect-free verdict preview |
 | A broad auto-approval rule approves too much | HIGH — governance bypassed | Ancestor restriction, reasons and audit on every change, immediate disable, explained verdicts |
 | A restrictive product default blocks gears after installation | MEDIUM — operations refused until administrators act | Gear defaults chosen by gear vendors; platform configuration reviewed per product |
@@ -1095,5 +1132,6 @@ Context attributes and justifications **MUST** be tenant-scoped, readable only b
 
 - **UPSTREAM_REQS**: [UPSTREAM_REQS.md](./UPSTREAM_REQS.md)
 - **Design**: [DESIGN.md](./DESIGN.md)
-- **ADRs**: None yet; approved decisions will be recorded in `docs/ADR/`.
+- **ADRs**: None yet; approved decisions will be recorded in `docs/ADR/`. Subsystem decisions: [Operation Governance ADR 0001](../../../docs/arch/operation-governance/ADR/0001-cpt-cf-operation-governance-adr-governance-gate.md), [ADR 0002](../../../docs/arch/operation-governance/ADR/0002-cpt-cf-operation-governance-adr-fact-collection.md).
+- **Subsystem**: [Operation Governance PRD](../../../docs/arch/operation-governance/PRD.md), [DESIGN](../../../docs/arch/operation-governance/DESIGN.md)
 - **Features**: None yet; implementation specifications will be recorded in `docs/features/`.

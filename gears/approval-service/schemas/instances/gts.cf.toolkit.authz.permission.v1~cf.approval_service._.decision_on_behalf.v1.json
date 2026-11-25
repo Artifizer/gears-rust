@@ -1,0 +1,6 @@
+{
+  "id": "gts.cf.toolkit.authz.permission.v1~cf.approval_service._.decision_on_behalf.v1",
+  "resource_type": "gts.cf.core.approval.opportunity.v1~",
+  "action": "decide_on_behalf",
+  "display_name": "Record or revoke decisions on behalf of a named approver (gear service identity)"
+}

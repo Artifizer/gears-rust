@@ -1,0 +1,233 @@
+{
+  "$id": "gts://gts.cf.core.events.event.v1~cf.core.approval.request_closed.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Request event 'request_closed'. Published exactly once per request when it closes: verdict no longer pending (decision, rule, policy, auto-approval, or opportunity change, through request reconciliation), context fingerprint changed on a register call, withdrawal, or projection deregistration (PRD cpt-cf-approval-service-fr-request-reconciliation). Published twice when the requester's tenant differs from the subject tenant: once with tenant_id = subject tenant and once with tenant_id = requester tenant (PRD cpt-cf-approval-service-fr-event-notifications, cpt-cf-approval-service-upreq-request-event-wait). Event subject = request ID, subject_type = the opportunity GTS type, so a gear can wait on it, for example with a Task Engine event wait, then read the outcome by request ID. Carries no context attributes or justification (PRD cpt-cf-approval-service-nfr-data-classification). Recorded durably in the same transaction as the change and delivered at least once after commit (PRD cpt-cf-approval-service-nfr-atomicity). Derived from the Event Broker base event type; routed to the approval_events topic and partitioned by subject for per-entity ordering.",
+  "x-gts-traits": {
+    "topic": "gts.cf.core.events.topic.v1~cf.core.approval.approval_events.v1",
+    "partition_key": "/subject",
+    "allowed_subject_types": [
+      "gts.cf.core.approval.opportunity.v1~"
+    ]
+  },
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "gts://gts.cf.core.events.event.v1~"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "gts.cf.core.events.event.v1~cf.core.approval.request_closed.v1~",
+          "$comment": "Pins the event-type identifier so an editor can validate a payload against this schema alone."
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "request_id": {
+              "description": "The request (also the event subject).",
+              "type": "string",
+              "format": "uuid"
+            },
+            "opportunity_type": {
+              "description": "Opportunity GTS type (also the event subject_type).",
+              "type": "string",
+              "x-gts-type-ref": "gts.cf.core.approval.opportunity.v1~"
+            },
+            "projection": {
+              "description": "Projection identity.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "projection_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "projection_type": {
+                  "type": "string",
+                  "x-gts-type-ref": "gts.cf.core.approval.projection.v1~"
+                },
+                "resource_tenant_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "resource_id": {
+                  "type": "string",
+                  "maxLength": 1024
+                },
+                "version": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "projection_type",
+                "resource_tenant_id",
+                "resource_id",
+                "version"
+              ]
+            },
+            "subject": {
+              "description": "Subject identifiers.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "subject_type": {
+                  "type": "string",
+                  "x-gts-type-ref": "gts.*"
+                },
+                "subject_tenant_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "subject_id": {
+                  "type": "string",
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "subject_type",
+                "subject_tenant_id",
+                "subject_id"
+              ]
+            },
+            "requester_tenant_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "correlation_id": {
+              "description": "Caller correlation ID stored with the request (PRD cpt-cf-approval-service-fr-correlation).",
+              "type": "string",
+              "maxLength": 256
+            },
+            "outcome": {
+              "description": "Settling outcome; present only when close_reason is 'verdict_settled'. Enum evolution: new outcomes only in a new major; consumers treat unknown values as refusal.",
+              "type": "string",
+              "enum": [
+                "approved",
+                "denied",
+                "not_required",
+                "invalid"
+              ]
+            },
+            "verdict_version": {
+              "description": "Monotonic version of the committed change (the change sequence). Verdicts computed after this change carry a version greater than or equal to it.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "dedup_key": {
+              "description": "Deterministic deduplication key (UUIDv5 over change sequence, event type, entity, and target tenant). Delivery is at least once; consumers deduplicate by this key (PRD cpt-cf-approval-service-fr-event-notifications).",
+              "type": "string",
+              "format": "uuid"
+            },
+            "scope_tenant_id": {
+              "description": "Scope tenant of the change.",
+              "type": "string",
+              "format": "uuid"
+            },
+            "changed_by": {
+              "description": "Authenticated identity whose call caused the change. Absent when the service caused it (reconciliation, expiry sweep).",
+              "type": "string",
+              "maxLength": 256
+            },
+            "close_reason": {
+              "description": "Why the request closed. Every closure publishes this event, whatever the cause. Enum evolution: new values only in a new major.",
+              "type": "string",
+              "enum": [
+                "verdict_settled",
+                "context_changed",
+                "withdrawn",
+                "projection_deregistered"
+              ]
+            },
+            "decisions": {
+              "description": "Active decisions the outcome relies on, with deciding authority (subject and scope tenant) and reasons (PRD cpt-cf-approval-service-upreq-decision-outcome).",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "decision_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "approve",
+                      "deny"
+                    ]
+                  },
+                  "approver_id": {
+                    "type": "string",
+                    "maxLength": 256
+                  },
+                  "scope_tenant_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "decision_id",
+                  "action",
+                  "approver_id",
+                  "scope_tenant_id",
+                  "reason",
+                  "created_at"
+                ]
+              }
+            },
+            "cause": {
+              "description": "The committed change that caused the closure: entity kind and ID (decision, rule, policy, auto_approval_rule, opportunity, projection, request).",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "decision",
+                    "rule",
+                    "policy",
+                    "auto_approval_rule",
+                    "opportunity",
+                    "projection",
+                    "request",
+                    "verification"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "maxLength": 1024
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          },
+          "required": [
+            "request_id",
+            "opportunity_type",
+            "projection",
+            "subject",
+            "requester_tenant_id",
+            "close_reason",
+            "cause",
+            "verdict_version",
+            "dedup_key",
+            "scope_tenant_id"
+          ]
+        }
+      }
+    }
+  ]
+}

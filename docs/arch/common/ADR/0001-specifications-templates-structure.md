@@ -5,7 +5,25 @@ date: 2026-02-08
 
 # Use structured spec templates with FDD traceability for project documentation
 
-**ID**: `fdd-common-adr-spec-templates-structure`
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Structured spec templates with FDD traceability](#structured-spec-templates-with-fdd-traceability)
+  - [Lightweight wiki-style documentation](#lightweight-wiki-style-documentation)
+  - [Formal requirements management tooling](#formal-requirements-management-tooling)
+  - [Code-first documentation only](#code-first-documentation-only)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
+**ID**: `cpt-cf-common-adr-spec-templates-structure`
 
 ## Context and Problem Statement
 
@@ -13,7 +31,7 @@ The project needs a consistent, scalable approach to documenting requirements, a
 
 How should we structure our specification documents to ensure consistency, traceability, and maintainability across the entire project?
 
-## Decision Drivers and Traceability
+## Decision Drivers
 
 * **Traceability** — ability to trace requirements through design, decisions, and implementation
 * **Consistency** — uniform structure across all gears and subsystems so contributors know where to find and place information

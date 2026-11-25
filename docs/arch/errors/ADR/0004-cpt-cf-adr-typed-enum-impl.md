@@ -5,6 +5,24 @@ date: 2026-02-28
 
 # Use Typed Enum with Category-Typed Constructors for CanonicalError
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Typed Enum](#option-a-typed-enum)
+  - [Option B: Per-Error Structs with `ErrorSchema` Trait](#option-b-per-error-structs-with-errorschema-trait)
+  - [Option C: Trait Object (`Box<dyn CanonicalError>`)](#option-c-trait-object-boxdyn-canonicalerror)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-errors-adr-typed-enum-impl`
 
 ## Context and Problem Statement

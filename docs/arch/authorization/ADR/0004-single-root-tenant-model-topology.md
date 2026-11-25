@@ -6,6 +6,25 @@ decision-makers: Constructor Fabric Steering Committee
 
 # Adopt Single-Root Tree Topology for the Tenant Model
 
+**ID**: `cpt-cf-authorization-adr-single-root-tenant-model-topology`
+
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Single-Root Tree (CHOSEN)](#option-a-single-root-tree-chosen)
+  - [Option B: Multi-Root Forest](#option-b-multi-root-forest)
+  - [Option C: DAG](#option-c-dag)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 ## Context and Problem Statement
 
 Gears model its tenants hierarchically. Gears rely on that hierarchy for ownership scoping, subtree queries in the Secure ORM, barrier enforcement, and resolution of "act as" semantics in service-to-service (S2S) flows. Before committing to a particular shape we must choose the canonical topology and record the reasoning.
@@ -63,6 +82,10 @@ Both shapes satisfy the same topology invariant: the hierarchy has exactly one t
 **Bad:**
 
 - **No native shared-ownership expression.** A tenant cannot belong to two sub-trees simultaneously. Cross-tree sharing must be modelled via explicit resource-group / policy mechanics, not via tenant parentage.
+
+### Confirmation
+
+Verify that tenant topology has exactly one root and that hierarchy reads respect self-managed tenant barriers.
 
 ## Pros and Cons of the Options
 

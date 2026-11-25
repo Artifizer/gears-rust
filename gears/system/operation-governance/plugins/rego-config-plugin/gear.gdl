@@ -1,0 +1,27 @@
+gdl_version = "1.0"
+
+# Every GDL field: https://github.com/constructorfabric/gearbox/blob/main/docs/gdl.md
+#
+# Gearbox product metadata for the Operation Governance Rego config plugin.
+
+gear(
+    deps = ["types-registry"],
+    source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/system/operation-governance/plugins/rego-config-plugin"),
+    maturity = "preview",
+    name = "Operation Governance Rego Config Plugin",
+    description = "Governance policies written in Rego and loaded from configuration, for development and testing.",
+    category = "core-platform-integration",
+    visibility = "internal",
+
+    package = cargo(
+        crate_name = "cf-gears-og-rego-config-plugin",
+        lib = "og_rego_config_plugin",
+        path = ".",
+    ),
+
+    implements = "cf.core.og.plugin.v1~",
+
+    # `operations` holds Rego sources; no control renders it, so it stays in the
+    # configuration file.
+    config_schema = config(exposes = ["vendor", "priority", "eval_timeout_ms", "applicability_lease_ms"]),
+)

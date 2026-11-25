@@ -6,6 +6,24 @@ decision-makers: Constructor Fabric Steering Committee
 
 # AuthN Resolver Minimalist Interface
 
+**ID**: `cpt-cf-authorization-adr-authn-resolver-minimalist-interface`
+
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Prescriptive Interface](#option-a-prescriptive-interface)
+  - [Option B: Minimalist Interface](#option-b-minimalist-interface)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 ## Context and Problem Statement
 
 AuthN Resolver is a gear that validates bearer tokens and produces `SecurityContext` for downstream gears (PEPs). The gear needs to define an interface for vendor-specific plugins that integrate with various Identity Providers (IdPs).
@@ -79,6 +97,10 @@ pub trait AuthNResolverPluginClient: Send + Sync {
 - The current OIDC AuthN plugin design ([DESIGN.md](../../../../gears/system/authn-resolver/plugins/oidc-authn-plugin/docs/DESIGN.md)) provides canonical patterns
 - Clear documentation of `SecurityContext` field semantics
 - Explicit error type definitions guide plugin error handling
+
+### Confirmation
+
+Verify that authentication plugins with different identity providers implement the same resolver interface and return the same platform result shape.
 
 ## Pros and Cons of the Options
 

@@ -5,18 +5,23 @@ date: 2026-07-31
 
 # Generated-Client Observability via `tracing`/OpenTelemetry (not a `ContractObservability` trait)
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A — `tracing`/OTEL](#option-a--tracingotel)
+  - [Option B — `ContractObservability` trait](#option-b--contractobservability-trait)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-binding-adr-client-observability`
-
-## Table of Contents
-
-1. [Context and Problem Statement](#context-and-problem-statement)
-2. [Decision Drivers](#decision-drivers)
-3. [Considered Options](#considered-options)
-4. [Decision Outcome](#decision-outcome)
-5. [Pros and Cons of the Options](#pros-and-cons-of-the-options)
-6. [Consequences](#consequences)
-7. [More Information](#more-information)
-
 ## Context and Problem Statement
 
 Generated REST/gRPC contract clients (`#[toolkit::rest_contract]`, `#[toolkit::grpc_contract]`) carry
@@ -78,6 +83,27 @@ The span path is routed through a `#[doc(hidden)] pub use tracing as __tracing;`
 There is **no** `ContractObservability` trait and **no** new `ClientConfig` field. DESIGN §6 has been
 rewritten to match.
 
+### Consequences
+
+* DESIGN §6 (`cpt-cf-binding-constraint-observability`) rewritten to describe the codegen-span
+  mechanism; the `ContractObservability`/`ClientConfig` sketch removed.
+* Generated REST clients emit a per-method span today (unary fully instrumented; streaming enters the
+  span per yielded item — full poll-time parenting of the SSE connect is a follow-up).
+* **RED metrics are feature-gated on `otel`.** `toolkit-contract` gains an `otel` feature that forwards
+  `toolkit-http/otel`; `runtime::client::build_default_http_client` has two cfg variants, so `otel` on ⇒
+  the client calls `.with_metrics(client_type)` (that builder method is `#[cfg(feature = "otel")]` on
+  `toolkit-http`) *and* injects W3C `traceparent`, and `otel` off ⇒ neither is compiled in (no
+  `opentelemetry` forced onto opt-out SDKs). SDKs opt in via their own `otel` feature. The per-method
+  `tracing` span is emitted regardless.
+* **gRPC deferred:** a `TraceContextInterceptor` in `toolkit-transport-grpc` (mirroring
+  `InternalAuthInterceptor`) + per-method spans in `grpc_contract.rs`, wiring the generated client via
+  `with_interceptor`.
+* Revisit Option B only if a pluggable non-`tracing` observability backend becomes a hard requirement.
+
+### Confirmation
+
+Verify that generated REST calls create a per-method span and that clients built with OpenTelemetry propagate its W3C trace context. Verify that a build without the feature can still use the generated client.
+
 ## Pros and Cons of the Options
 
 ### Option A — `tracing`/OTEL
@@ -105,23 +131,6 @@ rewritten to match.
 * Bad: a hand-rolled `RequestScope` does not compose across await points the way `tracing::Span` +
   `Instrument` does; more invasive codegen (4 hook calls threaded through the retry loop).
 * Bad: a parallel observability abstraction competing with the established `tracing` stack.
-
-## Consequences
-
-* DESIGN §6 (`cpt-cf-binding-constraint-observability`) rewritten to describe the codegen-span
-  mechanism; the `ContractObservability`/`ClientConfig` sketch removed.
-* Generated REST clients emit a per-method span today (unary fully instrumented; streaming enters the
-  span per yielded item — full poll-time parenting of the SSE connect is a follow-up).
-* **RED metrics are feature-gated on `otel`.** `toolkit-contract` gains an `otel` feature that forwards
-  `toolkit-http/otel`; `runtime::client::build_default_http_client` has two cfg variants, so `otel` on ⇒
-  the client calls `.with_metrics(client_type)` (that builder method is `#[cfg(feature = "otel")]` on
-  `toolkit-http`) *and* injects W3C `traceparent`, and `otel` off ⇒ neither is compiled in (no
-  `opentelemetry` forced onto opt-out SDKs). SDKs opt in via their own `otel` feature. The per-method
-  `tracing` span is emitted regardless.
-* **gRPC deferred:** a `TraceContextInterceptor` in `toolkit-transport-grpc` (mirroring
-  `InternalAuthInterceptor`) + per-method spans in `grpc_contract.rs`, wiring the generated client via
-  `with_interceptor`.
-* Revisit Option B only if a pluggable non-`tracing` observability backend becomes a hard requirement.
 
 ## More Information
 

@@ -1,0 +1,1340 @@
+# Technical Design — Approval Service
+
+<!-- toc -->
+
+- [Technical Design — Approval Service](#technical-design--approval-service)
+  - [1. Architecture Overview](#1-architecture-overview)
+    - [1.1 Architectural Vision](#11-architectural-vision)
+    - [1.2 Architecture Drivers](#12-architecture-drivers)
+    - [1.3 Architecture Layers](#13-architecture-layers)
+    - [1.4 Coexistence with `cf-gears-bss-approval`](#14-coexistence-with-cf-gears-bss-approval)
+  - [2. Principles \& Constraints](#2-principles--constraints)
+    - [2.1 Design Principles](#21-design-principles)
+    - [2.2 Constraints](#22-constraints)
+  - [3. Technical Architecture](#3-technical-architecture)
+    - [3.1 Domain Model](#31-domain-model)
+      - [3.1.1 Approval Request Type](#311-approval-request-type)
+      - [3.1.2 Approval Policy](#312-approval-policy)
+      - [3.1.3 Approval Request](#313-approval-request)
+      - [3.1.4 Approval Decision](#314-approval-decision)
+      - [3.1.5 Auto-Approval Rule](#315-auto-approval-rule)
+      - [3.1.6 Approval Plugin](#316-approval-plugin)
+      - [3.1.7 Audit Event](#317-audit-event)
+      - [3.1.8 Entity Relationship Diagram](#318-entity-relationship-diagram)
+      - [3.1.9 Approval Requirement and Default Policies](#319-approval-requirement-and-default-policies)
+    - [3.2 GTS Type Model](#32-gts-type-model)
+      - [3.2.1 Resource Type Identifiers](#321-resource-type-identifiers)
+      - [3.2.2 Request Type Contract](#322-request-type-contract)
+      - [3.2.3 Audit Event Type Identifiers](#323-audit-event-type-identifiers)
+      - [3.2.4 Storage Convention](#324-storage-convention)
+    - [3.3 Authorization Model](#33-authorization-model)
+      - [3.3.1 Permission Catalog](#331-permission-catalog)
+      - [3.3.2 PEP Integration](#332-pep-integration)
+      - [3.3.3 Eligibility vs. Platform Authorization](#333-eligibility-vs-platform-authorization)
+      - [3.3.4 `auth_context` in Approval Decision](#334-auth_context-in-approval-decision)
+      - [3.3.5 Service-to-Service Authentication](#335-service-to-service-authentication)
+      - [3.3.6 Round Lifecycle \& Policy Re-binding](#336-round-lifecycle--policy-re-binding)
+    - [3.4 Component Model](#34-component-model)
+      - [3.4.1 Policy Evaluation Engine](#341-policy-evaluation-engine)
+      - [3.4.2 Verification API Design](#342-verification-api-design)
+      - [3.4.3 Auto-Approval Evaluation](#343-auto-approval-evaluation)
+      - [3.4.4 Event Emission](#344-event-emission)
+      - [3.4.5 Decision Atomicity](#345-decision-atomicity)
+      - [3.4.6 Audit Log Immutability](#346-audit-log-immutability)
+      - [3.4.7 Phased Delivery of the Evaluation Layers](#347-phased-delivery-of-the-evaluation-layers)
+      - [3.4.8 Client SDK](#348-client-sdk)
+    - [3.5 API Contracts](#35-api-contracts)
+      - [3.5.1 REST Endpoint Summary](#351-rest-endpoint-summary)
+      - [3.5.2 Verification Response Shape](#352-verification-response-shape)
+      - [3.5.3 Configuration Examples](#353-configuration-examples)
+    - [3.6 Internal Dependencies](#36-internal-dependencies)
+    - [3.7 External Dependencies](#37-external-dependencies)
+    - [3.8 Interactions \& Sequences](#38-interactions--sequences)
+      - [3.8.1 Decision Submission Flow](#381-decision-submission-flow)
+      - [3.8.2 Verification Flow](#382-verification-flow)
+      - [3.8.3 Approval Decision Verdict Flow](#383-approval-decision-verdict-flow)
+      - [3.8.4 Approval Status Determination](#384-approval-status-determination)
+    - [3.9 Database schemas \& tables](#39-database-schemas--tables)
+    - [3.10 NFR Allocation](#310-nfr-allocation)
+  - [4. Traceability](#4-traceability)
+
+<!-- /toc -->
+
+## 1. Architecture Overview
+
+### 1.1 Architectural Vision
+
+The Approval Gear is a platform-level governance gear for consequential operations across integrated services. It decouples approval workflow logic from domain gears while preserving a consistent, auditable contract: integrated services define typed approval requests, the gear validates and tracks request state, and consumers verify the current verdict through a deterministic API.
+
+The gear is intentionally flexible and supports three decision mechanisms that can be combined per request type:
+
+- **Optional approval plugins** — external gear plugins may be registered for domain-specific callbacks or external governance checks. When present and eligible, they run at the beginning of the verdict flow.
+- **Runtime-defined auto-approval rules** — tenant-scoped declarative CEL predicates can approve matching requests without human review.
+- **Declarative approval policies** — administrators define human approval configuration such as quorum, mandatory approvers, segregation-of-duties, expiration, and revocation rules.
+
+The Approval Gear remains the source of truth for request lifecycle, policy-version snapshots, decision history, audit events, and low-latency verification. Domain gears keep their own business semantics; the Approval Gear owns the governance workflow.
+
+### 1.2 Architecture Drivers
+
+| Requirement | Design Response |
+|-------------|----------------|
+| `cpt-cf-approval-service-fr-evaluate-policy` | Policy Evaluation Engine runs atomically within each decision transaction; evaluates optional plugin verdicts, auto-approval rules, and **all** matched policies (logical AND) |
+| `cpt-cf-approval-service-fr-delegate-decision` | Optional decision delegation: if eligible approval plugins are configured, they run first and may return `FORCED_APPROVAL`/`APPROVED`/`NOT_APPROVED`/`IGNORE` |
+| `cpt-cf-approval-service-fr-verify-approval` | Read-only verification by request ID or approval target; resolves governance, then the active request through the tenant hierarchy (§3.4.2); evaluates against the snapshotted set of matched `policy_version_id`s |
+| `cpt-cf-approval-service-fr-approval-requirement` | Approval required only when an active policy matches; else `not_required` / `no_policy`; default policies from the service configuration (§3.1.9) |
+| `cpt-cf-approval-service-interface-sdk` | `ApprovalClientV1` with one `check` call plus options, local positive-verdict cache, and event-driven invalidation (§3.4.8) |
+| `cpt-cf-approval-service-fr-auto-approval` | Runtime-defined CEL rules are evaluated after optional plugins and before human approval policy quorum |
+| `cpt-cf-approval-service-fr-tenant-hierarchy` | Tenant hierarchy traversal via Tenant Resolver; restrict-only child semantics |
+| `cpt-cf-approval-service-fr-audit-trail` | Append-only audit events; all mutations publish audit event records in the same transaction |
+| `cpt-cf-approval-service-fr-event-notifications` | Outbox pattern — event records in the same transaction as state mutation |
+| `cpt-cf-approval-service-nfr-latency` | Verification response cache; see [NFR Allocation](#310-nfr-allocation) |
+| `cpt-cf-approval-service-nfr-atomicity` | Single-transaction write: decision + status + audit event publish + outbox |
+
+### 1.3 Architecture Layers
+
+| Layer | Responsibility | Technology |
+|-------|---------------|------------|
+| SDK library | Client-facing verification and request helpers, local positive-result cache, service-to-service token integration | approval-service-sdk |
+| Approval Gear | REST API, request validation, runtime rule/policy definitions, request lifecycle tracking, verification cache, audit/outbox events, PDP checks | Axum, SeaORM, `cel-interpreter`, modkit-db |
+| Approval Gear Plugins | Optional external callbacks for domain-specific approval, veto, or delegation decisions; invoked first when configured and eligible | ModKit plugin + ClientHub |
+
+### 1.4 Coexistence with `cf-gears-bss-approval`
+
+BSS gears (Pricing, Products, Orders Workflow) embed the library `cf-gears-bss-approval` (`gears/bss/libs/approval`). It stores approval units in each gear's own tables through the `Store` and `ApprovalSubject` traits.
+
+- **Now**: the Approval Gear and the library coexist. They share no tables and do not call each other. BSS gears keep using the library; new gears use the Approval Gear.
+- **Later**: the Approval Gear replaces the library. Migration starts when the Approval Gear covers what BSS gears rely on: multi-item units, exclusion of the submitter and all item authors, quorum fixed at submission, re-vote after content drift (content fingerprint and generation, mapped to evaluation rounds and reset), and the `ApprovalSourceV1` feed for the BSS Approvals Inbox.
+- **Migration path**: a BSS gear replaces its `Store` / `ApprovalSubject` implementation with calls to `ApprovalClientV1` (§3.4.8). Open units are finished in the library; new units go to the Approval Gear.
+
+## 2. Principles & Constraints
+
+### 2.1 Design Principles
+
+**ID**: `cpt-cf-approval-service-principle-append-only-audit`
+
+- **Append-only audit log** — use the dedicated Cyber Ware audit module for the durable audit events collection
+- **Optional decision delegation** — Approval plugins are optional. If configured and eligible for a request, they run first and can force-approve, veto, approve as an AND-term, or ignore. If no plugin is configured or eligible, the engine proceeds directly to auto-approval and policy evaluation (see §3.4.1, §3.1.6).
+- **Policy snapshot immutability (per round)** — Within an evaluation round, the **set of matched `policy_version_id`s** on a request never changes; evaluation is always against that snapshot. A new round (re-entry to `PendingApproval` after `Reject`/`Revoke`) re-matches and re-binds the matched policy versions to the then-active versions (see §3.1.3, §3.3.6). Decisions of completed rounds and their policy versions remain immutably preserved in the audit log.
+- **Fail-closed authorization** — PDP unavailability → `403 Forbidden`; no partial fallback
+- **Single-transaction writes** — Decision insert, status update, audit event publish, and outbox event write commit atomically
+- **Deterministic verification** — For a fixed `(matched_policy_versions, evaluation round, decision set, plugin verdicts, evaluation time)` the response is reproducible; always includes `matched_policy_versions` and a monotonic `decision_version`. Caching never changes the computed result (see §3.4.2).
+- **Fail-closed verification with bounded cache staleness** — Integrated services must treat any verification error, missing response, expired approval, or non-`Approved` status as **not approved**. Cached verification responses may be used only within a short configured TTL and are invalidated on status-changing writes. Every response includes a monotonic `decision_version`/ETag so a caller that has seen a newer version can require a fresh-enough read instead of accepting an older cached result. Expiration rules are checked during verification, so an approval past its deadline is returned as expired/not-approved even if the stored request status has not yet been proactively updated (see §3.4.2).
+- **Restrict-only hierarchy (rules & blocks) vs. additive status inheritance** — Two distinct hierarchy semantics coexist: approval *status* inherits **additively** downward (a child observes ancestor approvals plus its own), while auto-approval *rules* and tenant *blocks* are **restrict-only** (ancestor constraints bind descendants and cannot be widened). See §3.1.5 and §3.4.2.
+
+### 2.2 Constraints
+
+**ID**: `cpt-cf-approval-service-constraint-no-bearer-token-persistence`
+
+- Must use ModKit module architecture and `modkit-db` for persistence
+- Must use the platform AuthZ Resolver (PDP) for all access control decisions; no custom authorization logic
+- Must use the platform AuthN Resolver for all bearer token validation
+- `bearer_token` from `SecurityContext` must never be persisted to storage or included in audit events
+- All GTS Type Identifiers used as lookup keys must be stored as deterministic UUID v5 values in indexed columns
+
+## 3. Technical Architecture
+
+### 3.1 Domain Model
+
+> Entity schemas derived from the domain concepts defined in [PRD.md § 3 — Logical Domain Model](./PRD.md#3-logical-domain-model).
+
+#### 3.1.1 Approval Request Type
+
+An **Approval Request Type** is the GTS type that defines the **schema of an approval request**, including explicit `subject` and `resource` blocks with extensible metadata: `subject` describes the actor or beneficiary the approval is requested for, while `resource` describes the protected business target affected by the requested action. It is the central extension point of the service: integrated services derive concrete request types that refine the `subject.metadata` and `resource.metadata` schemas, and each incoming request is **fully validated against its request type's schema** at creation.
+
+The abstract base type defines the invariant request envelope:
+
+```json
+{
+  "$id": "gts://gts.cf.core.approval.req_type.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-gts-abstract": true,
+  "title": "Approval Request Type",
+  "description": "Abstract base type for approval requests. Derived types add subject/resource metadata schemas.",
+  "type": "object",
+  "required": ["type", "tenant", "subject", "resource"],
+  "properties": {
+    "type": {
+      "description": "GTS Type Identifier of the concrete approval request type (this type).",
+      "type": "string",
+      "x-gts-ref": "/$id"
+    },
+    "tenant": { "description": "Tenant scope of the request.", "type": "string", "format": "uuid" },
+    "subject": {
+      "description": "Subject the approval is requested for / on behalf of.",
+      "type": "object",
+      "required": ["description", "metadata"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "metadata": {
+          "description": "Subject payload; shape refined by the derived request type.",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resource": {
+      "description": "Protected object under approval.",
+      "type": "object",
+      "required": ["description", "metadata"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "metadata": {
+          "description": "Resource payload; shape refined by the derived request type.",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
+```
+
+Example derived request type — LLM Gateway model access (the subject/resource payloads that used to be implicit now live here):
+
+```json
+{
+  "$id": "gts://gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LLM Model Access Approval Request",
+  "description": "Request to grant a subject access to use a specific frontier LLM.",
+  "type": "object",
+  "allOf": [
+    { "$ref": "gts://gts.cf.core.approval.req_type.v1~" },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~" },
+        "subject": {
+          "type": "object",
+          "required": ["description", "metadata"],
+          "properties": {
+            "description": { "type": "string", "minLength": 1 },
+            "metadata": {
+              "type": "object",
+              "required": ["plan_tier"],
+              "properties": {
+                "plan_tier": { "type": "string", "enum": ["free", "pro", "enterprise"] }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "resource": {
+          "type": "object",
+          "required": ["description", "metadata"],
+          "properties": {
+            "description": { "type": "string", "minLength": 1 },
+            "metadata": {
+              "type": "object",
+              "required": ["model_provider", "model_name"],
+              "properties": {
+                "model_provider": { "type": "string", "minLength": 1 },
+                "model_name":     { "type": "string", "minLength": 1 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
+```
+
+- **Lifecycle**: Defined as a GTS type by the owning Integrated Service → registered in Type Registry → versioned via GTS major/minor. New minor versions add optional `subject.metadata` / `resource.metadata` fields; major versions are breaking.
+- **Validation**: At request creation the `subject` and `resource` payloads are validated against the resolved request-type schema (at the request type's exact version). Validation failure → `422`.
+- **Why GTS**: request schemas must evolve per integrated service without DB migrations, and they participate in wildcard authorization (e.g. `gts.cf.core.approval.req_type.v1~cf.genai.*`) and policy/auto-rule version matching (§3.1.2).
+
+#### 3.1.2 Approval Policy
+
+A policy is a versioned set of **quorum and constraint** rules attached to one or more **scopes**. **Multiple policies may match the same request and ALL matched policies must be satisfied (logical AND)** — this lets independent org functions (e.g. Compliance and Security) each impose their own policy on the same action.
+
+| Attribute | Type | Constraints |
+|-----------|------|-------------|
+| id | UUID | PK, immutable |
+| tenant_id | TenantID | Tenant the policy applies to; it also applies to descendant tenants. Default policies use the root tenant (§3.1.9) |
+| scope_refs | List\<GTS Type Identifier\> | **1..many**. Each ref targets an `Approval Request Type`. See **Scope matching** below |
+| version | Integer | Auto-incremented; immutable once snapshotted onto a request round |
+| min_approvals | Integer | ≥ 1. Quorum: number of *distinct authorized approvers* required **for this policy** |
+| mandatory_approvers | List\<UserID\> | Quorum constraint: each listed subject MUST cast a valid approval for this policy. Listed subjects must independently hold the `approve` permission (PDP-validated, §3.3.3); this field does **not** itself grant approval authority |
+| expiration_rules | JSON | Optional; captures deadline / TTL semantics |
+| revocation_permitted | Boolean | Whether approved requests may be revoked |
+| segregation_of_duties | Boolean | If true, requester cannot approve own request |
+| allow_duplicate_approval | Boolean | If true, same user may re-approve |
+| comment_requirements | Enum { None, OnReject, OnRejectAndRevoke, Always } | When a comment is mandatory on decisions |
+| is_active | Boolean | Whether this policy version participates in matching. Policies are **independently versioned and may freely overlap** |
+| created_at | Timestamp | Immutable |
+
+- **Multi-policy AND**: a request is `Approved` only when **every** matched, active policy is independently satisfied. `Reject`/`Revoke` remain veto-style across the whole request (§3.4.1).
+- **Per-policy decisions**: a decision is cast **for a specific policy** (e.g. a user approves from the Compliance policy but not the Security policy). A decision counts only toward the policy it was cast for (§3.1.4, §3.4.1).
+- **Scope matching** (`cpt-cf-approval-service-fr-manage-policy`): a policy matches a request when any `scope_ref` matches the request type, using GTS version semantics:
+  - **Request-type major-only ref** (e.g. `…model_access.v1~`) → matches the request type at **any minor** of that major (`v1`, `v1.1`, `v1.7`, …).
+  - **Request-type minor ref** (e.g. `…model_access.v1.2~`) → matches that exact minor **and all newer minors of the same major** (`v1.2`, `v1.3`, …), never `v1.0`/`v1.1`.
+  - **Cross-major never matches** (a `v1` ref never matches a `v2` request type).
+  - Version-range resolution uses the GTS Registry, never SQL `LIKE` over stored strings (per GTS §5.1).
+- **Lifecycle**: Created / updated by Approval Administrator → new version created on every change → previous versions remain read-only and remain snapshotted on the request rounds that matched them.
+- **Approver authority is external (PDP/IAM), not stored on the policy**: *which* subjects may approve is governed by the `approve`/`reject`/`revoke` permission on the request's **`req_type`** (granted to IAM roles, evaluated by the PDP at decision time, §3.3.3). The policy intentionally does **not** store an `eligible_roles`/`eligible_users` allow-list. The policy carries only **quorum and constraint** rules.
+
+#### 3.1.3 Approval Request
+
+A request is an instance of an `Approval Request Type` (§3.1.1). The protected object's identity (e.g. which model) lives in the request **`resource.metadata`**, not in dedicated columns.
+
+| Attribute | Type | Constraints |
+|-----------|------|-------------|
+| id | UUID | PK, immutable |
+| req_type | GTS Type Identifier | The request type (`…approval.req_type.v1~…~`) at its exact version; immutable |
+| tenant_id | TenantID | Scoped to tenant (the request `tenant` field) |
+| subject | JSON | Validated against the `req_type.subject` schema at the request type's exact version; immutable |
+| resource | JSON | Validated against the `req_type.resource` schema at the request type's exact version; immutable |
+| matched_policy_versions | Set\<UUID\> | **Service-managed, read-only to clients**. Snapshot of the matched, active policy versions bound at round start (see Round semantics); re-matched each round |
+| status | Enum { Draft, PendingApproval, Approved, Rejected, Expired, Cancelled, Revoked } | **Service-managed, read-only to clients**. See [PRD § 3.3 — State Machine](./PRD.md#33-request-status-state-machine) |
+| current_round | Integer | **Service-managed, read-only to clients**. Evaluation round; starts at 1, incremented on each re-entry to `PendingApproval` after `Reject`/`Revoke`. Only decisions tagged with the current round are counted |
+| created_at | Timestamp | **Service-managed, read-only to clients** |
+| updated_at | Timestamp | **Service-managed, read-only to clients**; auto-updated on status change |
+
+- **Round semantics**: When the request re-enters `PendingApproval` from `Rejected`/`Revoked`, `current_round` is incremented and `matched_policy_versions` is **re-matched and re-bound** to the then-active policy versions. This (a) gives revocation/rejection a meaningful reset boundary — prior-round approvals never silently re-satisfy a policy quorum — and (b) prevents a reject→re-approve loop from bypassing a policy that was tightened in the interim. See [PRD § 3.3](./PRD.md#33-request-status-state-machine) and §3.4.1.
+- **Active-request uniqueness**: At most one **non-terminal** request (`Draft`/`PendingApproval`/`Approved`) may exist per `(tenant_id, req_type, canonicalized subject/resource payload)`. Two requests collide only when every subject/resource field matches. Enforced via a deterministic hash of the canonicalized subject/resource payload (§3.9). This makes the verification result unambiguous (§3.4.2).
+
+#### 3.1.4 Approval Decision
+
+A decision is always cast **for a specific matched policy** — the same subject may approve under one policy (e.g. Compliance) and not another (e.g. Security).
+
+| Attribute | Type | Constraints |
+|-----------|------|-------------|
+| id | UUID | PK, immutable |
+| request_id | UUID | FK → Approval Request |
+| policy_version_id | UUID | The matched policy version this decision is cast for; MUST be in the request's `matched_policy_versions` for the round |
+| approver_id | UserID | Immutable; for `AutoApprove`/plugin decisions, the Approval Service system service-account id |
+| decision_type | Enum { Approve, Reject, Revoke, AutoApprove } | Required. `AutoApprove` is system-generated (actor_type = Service) and records the deciding plugin + matched rule in `auth_context` |
+| round | Integer | Evaluation round (= `ApprovalRequest.current_round`) this decision was cast in; the engine counts only decisions whose `round` equals the request's current round |
+| comment | String | Optional |
+| auth_context | JSON | Authentication / authorization snapshot; for plugin/`AutoApprove`, records the plugin instance id and matched rule/CEL instead of a human subject |
+| created_at | Timestamp | Immutable |
+
+- **Lifecycle**: Created by Approver, Approval Administrator, or an approval plugin → immutable after creation; no update or delete.
+- A human `Reject`/`Revoke` is request-level veto (it does not need to be tied to all policies); it transitions the whole request (§3.4.1).
+
+#### 3.1.5 Auto-Approval Rule
+
+An auto-approval rule carries an optional **CEL** expression evaluated against the approval request. It is the **second layer of the normal approval check** (after plugins, before policy quorum, §3.4.1): a matched rule auto-approves the request (skipping human review / policy) — this is the **p2** capability (§3.4.7). Auto-approval is evaluated natively by the engine, not by a plugin.
+
+| Attribute | Type | Constraints |
+|-----------|------|-------------|
+| id | UUID | PK, immutable |
+| scope_refs | List\<GTS Type Identifier\> | **1..many**. Each ref targets a `Request Type`; same version-match semantics as policy scope (§3.1.2) |
+| tenant_id | TenantID | Scoped to tenant |
+| cel_expression | String (CEL) | **Optional**. A [CEL](https://github.com/google/cel-spec) expression evaluated against the approval request, returning a boolean. Omitted/empty ⇒ unconditional match. Example: `resource.metadata.model_provider == "openai" && resource.metadata.model_name == "gpt-5"` |
+| is_active | Boolean | Default: true |
+| created_at | Timestamp | Immutable |
+| updated_at | Timestamp | Auto-updated |
+
+- **CEL input**: the whole **approval request** object (`type`, `tenant`, `subject`, `resource`); there are no separate tenant/resource inputs because those are fields of the request. The expression returns `true`/`false`.
+- **Hierarchy Rule (restrict-only, intersection semantics)**: the *effective* auto-approval predicate for a tenant is the **logical AND** of its own active rules with every ancestor-tenant rule for the same scope. A child rule may only **add** constraints (narrow the matched set); it cannot remove, relax, or disable an ancestor rule, and it cannot re-enable auto-approval an ancestor disabled. A request auto-approves only if it satisfies the ancestor CEL predicates **and** the child predicates. This is distinct from additive approval *status* inheritance (§3.4.2).
+- **Malformed/erroring CEL**: a rule whose CEL fails to compile or errors at evaluation does **not** match (no auto-approval); the request proceeds to manual/policy evaluation.
+
+#### 3.1.6 Approval Plugin
+
+Approval plugins are optional GTS ModKit plugins (`gts.cf.core.approval.plugin.v1~`, §3.2). When configured and eligible for a request, they run first and provide domain-specific callbacks or external governance checks through a **single decision interface**:
+
+```
+enum ApprovalPluginDecision {
+    FORCED_APPROVAL,  // approve unconditionally — no other approvals/checks needed (terminal)
+    APPROVED,         // this plugin approves — AND-combined with the normal approval check
+    NOT_APPROVED,     // veto — request is not approved; verdict returned to the caller (terminal)
+    IGNORE,           // no opinion — fall through to the normal approval check
+}
+
+trait ApprovalPlugin { fn decide(&self, request: &ApprovalRequest) -> ApprovalPluginDecision; }
+```
+
+| Decision | Meaning | Effect on the verdict |
+|----------|---------|-----------------------|
+| **`FORCED_APPROVAL`** | No other approvals/checks needed | **Terminal**: status = `Approved`, bypassing auto-approval, the per-policy quorum, and every other plugin |
+| **`NOT_APPROVED`** | Hard block / veto | **Terminal**: status = `Rejected`, verdict returned to the caller |
+| **`APPROVED`** | Plugin approves, combined via **AND** with the normal approval check | **Non-terminal**: a satisfied AND-term — does not block, but does not bypass the normal check. `Approved` only if the normal approval check *also* passes |
+| **`IGNORE`** | Abstain | **Non-terminal**: the plugin does not participate; fall through to the normal approval check |
+
+- **Scope-based registration (`scope_refs`, 1..many)**: at registration a plugin instance declares the **approval request types** it is associated with (same GTS version-match semantics as policy/auto-rule scope, §3.1.2), recorded as `approval_scope_refs` rows with `owner_kind = 'plugin'` (§3.9). If plugins are configured, **all plugins whose `scope_refs` match the request `req_type`** are eligible and **MUST** be invoked. Several plugins may match the same request.
+- **Plugins run first** (before auto-approval and policies, §3.4.1). Eligible plugins are invoked in ModKit `priority` order. The **first plugin returning a terminal decision** (`FORCED_APPROVAL` or `NOT_APPROVED`) wins and short-circuits — plugin `priority` is the single deterministic precedence rule between a forced approval and a veto. Place security/veto plugins at higher priority than force-approve plugins when a veto must dominate.
+- **Non-terminal combination**: if no eligible plugin returns a terminal decision, the engine proceeds to the **normal approval check** (auto-approval, then policy quorum, §3.4.1). `APPROVED` plugins are **satisfied AND-terms** (recorded as system approvals) that are AND-combined with that check; `IGNORE` plugins contribute nothing. No non-terminal plugin can upgrade a pending request to `Approved`.
+- **Default plugin (`all-approved`)**: the service may ship a built-in reference plugin `gts.cf.core.approval.plugin.v1~cf.core.approval.all_approved.v1~` for early rollout/testing. It is optional and **MUST NOT** be enabled by default in environments that rely on auto-approval rules or human approval policies.
+- **Plugin authority**: a plugin returning `FORCED_APPROVAL`/`APPROVED`/`NOT_APPROVED` produces a system `AutoApprove`/`Reject` decision (actor_type = Service) recording the plugin instance id in `auth_context` (§3.3.4), so non-human verdicts are fully auditable.
+- **Failure mode (fail-closed)**: a plugin error or timeout is treated as **`NOT_APPROVED`** (a governance constraint that cannot be evaluated must not be silently satisfied).
+
+#### 3.1.7 Audit Event
+
+| Attribute | Type | Constraints |
+|-----------|------|-------------|
+| id | UUID | PK, immutable |
+| event_type | GTS Instance Identifier | Required; a well-known approval event instance (§3.2.3), stored as deterministic UUID v5 (§3.2.4) |
+| actor_id | UUID | Subject `id` from `SecurityContext` for human actors; service account `id` for system actors |
+| actor_type | Enum { User, Service, Administrator } | Required |
+| source_system | String | Originating service identifier |
+| target_entity_type | String | e.g. "ApprovalRequest", "ApprovalPolicy" |
+| target_entity_id | UUID | FK to the affected entity |
+| previous_state | JSON | Nullable (e.g. null for creation events) |
+| new_state | JSON | Required |
+| policy_version_id | UUID | FK → Approval Policy version in effect |
+| timestamp | Timestamp | Immutable |
+
+- **Lifecycle**: Append-only event contract; no update or delete operations permitted by consumers, including Administrators.
+- **Storage ownership**: The physical database schema for durable audit records is **out of scope** for the Approval Service. Audit persistence, retention, partitioning, and topic delivery are owned by the dedicated Cyber Ware audit module. The Approval Service only defines and emits the approval audit event schema/payload, including fields such as `timestamp`, `actor_id`, `actor_type`, `tenant_id`, `source_system`, `event_type`, `target_entity_type`, `target_entity_id`, `previous_state`, `new_state`, and `policy_version_id`.
+
+#### 3.1.8 Entity Relationship Diagram
+
+```
+┌────────────────────────┐
+│ Approval Request Type  │
+│ (GTS type, schema)     │
+└───────────┬────────────┘
+            │ 1
+            │ instance-of
+            │ *
+            │                       ┌────────────────────┐
+┌───────────┴───────┐ scope_refs    │  Approval Request  │
+│  Approval Policy  │──────────────►│ (tenant, subject,  │
+│  (versioned, AND, │ 1..*          │  resource)         │
+│   freely overlap) │               └─────────┬──────────┘
+└───────────────────┘                         │ 1
+        ▲                                     │ * (per matched policy)
+        │ matched set                ┌────────┴──────────┐
+        │ (snapshot/round)           │ Approval Decision  │
+        │                            │ (FK policy_version)│
+┌───────┴───────────┐                 └────────┬──────────┘
+│ Auto-Approval Rule│  consumed by             ▼ (generates)
+│ (CEL, per tenant, │◄───────────┐      ┌───────────────────┐
+│  scope 1..*)      │            │      │   Audit Event      │
+└───────────────────┘            │      │  (append-only)     │
+                                 │      └───────────────────┘
+                        ┌────────┴──────────┐
+                        │ Approval Plugin   │  single decide() interface
+                        │ (GTS modkit plugin│  FORCED_APPROVAL/APPROVED/
+                        │  optional)        │  NOT_APPROVED/IGNORE
+                        └───────────────────┘
+```
+
+> **Notes**: Policies, auto-rules, and optional plugins scope directly to request types (1..many). All matched policies must be satisfied (AND). The Approval Plugin layer is a single optional `decide()` interface returning `FORCED_APPROVAL`/`APPROVED`/`NOT_APPROVED`/`IGNORE`. Audit events are generated by Request-Type, Policy, Request, and Decision mutations — not only by Decisions.
+
+#### 3.1.9 Approval Requirement and Default Policies
+
+There is no separate "governance" switch (`cpt-cf-approval-service-fr-approval-requirement`). Gears only register request types and ask for verdicts.
+
+- **Rule**: approval is required for a request in a tenant only when at least one active policy matches its `req_type` (§3.1.2) in that tenant or an ancestor tenant. No match → `not_required`, reason `no_policy`.
+- **Conditions**: "approve automatically under some condition" (for example, order total below a threshold) is an auto-approval rule (§3.1.5). The request is created and approved by the rule, so it is audited.
+- **Default policies**: the service configuration may list default policies per request type:
+
+  ```toml
+  [[default_policies]]
+  name = "llm-model-access"
+  scope_refs = ["gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~"]
+  min_approvals = 1
+  ```
+
+  At startup the service creates each default policy on the root tenant if it does not exist yet. The policy id is a UUID v5 of `name`. After that, it is a normal versioned policy: administrators can change or deactivate it, and a restart does not overwrite their changes.
+
+### 3.2 GTS Type Model
+
+> Follows [guidelines/GTS.md § 14 — Reviewing GTS in DESIGN](../../../guidelines/GTS.md#14-reviewing-gts-in-design).
+
+#### 3.2.1 Resource Type Identifiers
+
+The Approval Service defines GTS Resource Type Identifiers for all primary domain entities. These identifiers are used in:
+- RFC 9457 Problem responses (`context.resource_type` field) for machine-readable error classification
+- Authorization requests to the AuthZ Resolver (`resource.type` field in PDP evaluation)
+- Cross-module references and wildcard access-control policies
+
+| Resource | GTS Type Identifier |
+|----------|-------------------|
+| Approval Request Type base type | `gts.cf.core.approval.req_type.v1~` |
+| Approval Policy | `gts.cf.core.approval.policy.v1~` |
+| Approval Request | `gts.cf.core.approval.request.v1~` |
+| Approval Decision | `gts.cf.core.approval.decision.v1~` |
+| Auto-Approval Rule | `gts.cf.core.approval.auto_rule.v1~` |
+| Approval Plugin base type | `gts.cf.core.approval.plugin.v1~` |
+| Audit Event | `gts.cf.core.approval.audit_event.v1~` |
+
+All resource type identifiers are defined via `#[struct_to_gts_schema]` in the `approval-service-sdk` crate (`approval-service-sdk/src/gts.rs`). GTS constants are centralized in `domain/gts_helpers.rs`.
+
+Request types use a GTS base/derived hierarchy rather than an Approval-Service-owned UUID namespace:
+
+- **Base request type** (schema + subject/resource metadata): `gts.cf.core.approval.req_type.v1~`
+  - Derived example: `gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~`
+- **Base plugin type** (derives from the ModKit plugin base): `gts.cf.core.modkit.plugin.v1~cf.core.approval.plugin.v1~`
+  - Default plugin instance source: `gts.cf.core.approval.plugin.v1~cf.core.approval.default.v1~`
+
+The Type Registry owns request-type registration metadata (`created_at`, `updated_at`) and exposes the type schemas. The Approval Service stores type references as GTS identifiers plus deterministic UUID v5 columns where indexing requires UUID storage.
+
+#### 3.2.2 Request Type Contract
+
+The `req_type` field in `Approval Request` **MUST** be a valid GTS Type Identifier (ending with `~`) deriving from `gts.cf.core.approval.req_type.v1~`, owned and registered by the Integrated Service. This is the primary extension point (it replaces the former `business_object_type` field — object identity now lives in `resource.metadata`):
+
+- Different integrated services define their own request types and metadata schemas independently, without DB migrations (hybrid storage, GTS §5).
+- The request type enables wildcard access-control policies over families of request types (e.g. all GenAI request types: `gts.cf.core.approval.req_type.v1~cf.genai.*`).
+- Policies and auto-approval rules scope to request types with version-match semantics (§3.1.2).
+- The Approval Service validates the identifier format and the `subject` / `resource` payloads against the resolved request-type schema at request creation.
+
+Example — LLM gateway model access:
+```
+req_type: "gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~"
+subject:  { description: "Requester context", metadata: { plan_tier: "pro" } }
+resource: { description: "Model access", metadata: { model_provider: "openai", model_name: "gpt-5" } }
+```
+
+#### 3.2.3 Audit Event Type Identifiers
+
+Approval domain events derive from the **canonical platform event base type** `gts.cf.core.events.type.v1~` (per [guidelines/GTS.md §5.3](../../../guidelines/GTS.md#53-events-table--hybrid-storage)) via the approval-specific derived type `gts.cf.core.events.type.v1~cf.core.audit.event.v1~`. The `event_type` field in every approval audit event and emitted platform event references a **GTS well-known Instance Identifier** of that derived type.
+
+The derived type `gts.cf.core.events.type.v1~cf.core.audit.event.v1~` is marked `x-gts-abstract: true` — all audit events and emitted events must reference a concrete well-known instance, never the (abstract) type itself. Instance identifiers end without `~`; the type chain ends with `~`.
+
+| Event Concept | GTS Well-Known Instance Identifier |
+|---------------|-----------------------------------|
+| Request created | `gts.cf.core.events.type.v1~cf.core.audit.event.v1~cf.core.approval.request_created.v1` |
+| Decision submitted | `gts.cf.core.events.type.v1~cf.core.audit.event.v1~cf.core.approval.decision_submitted.v1` |
+| Auto-approved (system) | `gts.cf.core.events.type.v1~cf.core.audit.event.v1~cf.core.approval.auto_approved.v1` |
+| Status changed | `gts.cf.core.events.type.v1~cf.core.audit.event.v1~cf.core.approval.status_changed.v1` |
+| Policy updated | `gts.cf.core.events.type.v1~cf.core.audit.event.v1~cf.core.approval.policy_updated.v1` |
+| Admin override | `gts.cf.core.events.type.v1~cf.core.audit.event.v1~cf.core.approval.admin_override.v1` |
+
+The `auto_approved` event is emitted by the system actor (service account) when an approval plugin override returns `YES`; the corresponding `AutoApprove` decision, the deciding plugin instance id, and the matched auto-rule/CEL are recorded so the audit trail can represent non-human approvals (see §3.4.3). Audit event payloads include approval-service fields such as `timestamp`, `actor_id`, `actor_type`, `tenant_id`, `source_system`, target entity identity, previous/new state, and `policy_version_id`; durable audit storage remains owned by the dedicated Cyber Ware audit module.
+
+Well-known event instances are declared via `gts_instance!` macro and self-register with `types-registry` at startup.
+
+#### 3.2.4 Storage Convention
+
+- **GTS Type Identifiers** used as lookup keys (e.g., `req_type`, policy/auto-rule `scope_refs`) are stored as **deterministic UUID v5** values derived from the GTS identifier string — never as raw text in indexed columns (per GTS §5.1). The human-readable GTS string is stored in a companion `*_gts_id TEXT` column for display and debugging only.
+- **GTS Instance Identifiers** for well-known event types follow the same UUID storage pattern.
+- String storage for GTS identifiers is acceptable only in audit log human-readable fields and API responses where the readable form is the primary value.
+
+**Validation flow at boundaries** (per [guidelines/GTS.md §14](../../../guidelines/GTS.md#14-reviewing-gts-in-design)): every GTS identifier crossing an API or persistence boundary is processed as **parse → resolve if registry-backed → validate → authorize → persist** — parse the string into a typed `GtsTypeId`/`GtsInstanceId` (reject anything that is not a full identifier; type refs MUST end with `~`), resolve it against the GTS Registry when the type is registry-backed in the current release phase, validate the payload against the resolved Type Schema where available, run the PDP authorization check (§3.3), then derive the UUID v5 and persist. Integrated-service `req_type` values are format-validated, schema-validated, and authorized; policy/auto-rule **version-range matching** (§3.1.3) and wildcard `req_type` authorization are resolved via the GTS Registry, never via SQL `LIKE` over stored strings.
+
+### 3.3 Authorization Model
+
+> Follows [docs/arch/authorization/DESIGN.md](../../../docs/arch/authorization/DESIGN.md) PDP/PEP model and [docs/arch/authorization/PERMISSION_GTS_TYPE.md](../../../docs/arch/authorization/PERMISSION_GTS_TYPE.md).
+
+#### 3.3.1 Permission Catalog
+
+The Approval Service declares the following well-known permission instances of type `gts.cf.modkit.authz.permission.v1~`. These are registered with `types-registry` at module startup via the `gts_instance!` macro (no runtime registration code required).
+
+| Permission Instance Identifier | Resource Type | Action | Granted to Actors |
+|-------------------------------|---------------|--------|-------------------|
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.req_type_register.v1` | `gts.cf.core.approval.req_type.v1~` | `register` | Integrated Service, Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.req_type_read.v1` | `gts.cf.core.approval.req_type.v1~` | `read` | Integrated Service, Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.policy_read.v1` | `gts.cf.core.approval.policy.v1~` | `read` | Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.policy_manage.v1` | `gts.cf.core.approval.policy.v1~` | `manage` | Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.request_create.v1` | `gts.cf.core.approval.request.v1~` | `create` | Integrated Service, Requester |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.request_read.v1` | `gts.cf.core.approval.request.v1~` | `read` | Integrated Service, Requester, Approver |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.request_read_all.v1` | `gts.cf.core.approval.request.v1~` | `read_all` | Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.request_cancel.v1` | `gts.cf.core.approval.request.v1~` | `cancel` | Requester (own requests), Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.request_override.v1` | `gts.cf.core.approval.request.v1~` | `override` | Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.decision_submit.v1` | `gts.cf.core.approval.decision.v1~` | `submit` | Eligible Approver (resolved via PDP — see below) |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.bulk_approve.v1` | `gts.cf.core.approval.decision.v1~` | `bulk_approve` | Admin, Eligible Approver (resolved via PDP — see below) |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.status_verify.v1` | `gts.cf.core.approval.request.v1~` | `verify` | Integrated Service |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.audit_read.v1` | `gts.cf.core.approval.audit_event.v1~` | `read` | Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.auto_rule_manage.v1` | `gts.cf.core.approval.auto_rule.v1~` | `manage` | Admin |
+| `gts.cf.modkit.authz.permission.v1~cf.core.approval.plugin_manage.v1` | `gts.cf.core.approval.plugin.v1~` | `manage` | Admin |
+
+Permission instances are declared at compile time in `approval-service/src/gts/permissions.rs`.
+
+> **Action-granularity note**: `manage` (on `policy`/`auto_rule`) and `read_all` (on `request`) are intentional **coarse gates**, not violations of the atomic-action rule in [PERMISSION_GTS_TYPE.md § `resource_type` Semantics](../../../docs/arch/authorization/PERMISSION_GTS_TYPE.md#resource_type-semantics). `read`/`read_all` are kept as **distinct actions** (rather than a single `read` action narrowed by an owner/tenant PDP constraint, per AUTHZ scenarios S06/S28) so that the *capability* to see other subjects' requests is grantable independently of ownership scoping. If finer governance is later required, `manage` may be decomposed into atomic `create`/`update`/`deactivate` actions via a permission minor-version evolution without breaking existing role grants.
+
+**Endpoint-to-permission mapping**: The `bulk_approve` permission gates the `POST /v1/approval-requests:bulk-approve` endpoint (§3.5.1) as the coarse access gate; **per-item approver authority is still resolved via the PDP** against each item's `req_type` (the same `approve` eligibility as a single decision, §3.3.3) — `bulk_approve` does not bypass per-request-type eligibility.
+
+**Approver authority is not a static role in this catalog.** `decision_submit` above is only the coarse gate that the caller may reach the decisions endpoint. The *substantive* authority — whether a subject is an **eligible approver** for a given request — is the `approve` / `reject` / `revoke` permission on the **request type under approval** (`req_type`). These permissions are declared by the **owning Integrated Service** (it owns the `req_type` GTS type) as instances of `gts.cf.modkit.authz.permission.v1~`, e.g.:
+
+```
+{ id: "gts.cf.modkit.authz.permission.v1~cf.genai._.model_access_approve.v1",
+  resource_type: "gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~", action: "approve", display_name: "Approve LLM model access" }
+```
+
+These permissions are granted to roles in the platform IAM (`gts.cf.iam.identity.role.v1~…`). The Approval Service (PEP) evaluates them via the PDP at decision submission (§3.3.3); it never maintains its own role/user eligibility lists. This keeps authority management in IAM and lets a single role grant approval rights across a wildcard family of request types (e.g. `gts.cf.core.approval.req_type.v1~cf.genai.*`).
+
+#### 3.3.2 PEP Integration
+
+The Approval Service acts as a **PEP (Policy Enforcement Point)**. All mutating operations and sensitive reads are gated through `authz-resolver-sdk::PolicyEnforcer` before data access:
+
+```
+Request → AuthN Middleware → SecurityContext → Handler (PEP)
+                                                  ↓
+                                         PolicyEnforcer → AuthZ Resolver (PDP)
+                                         evaluate(subject, action, resource, context)
+                                                  ↓
+                                         constraints → AccessScope
+                                                  ↓
+                                      SecureConn / SecureTx → Database
+```
+
+1. **AuthN Middleware** extracts the bearer token, calls AuthN Resolver → produces `SecurityContext`
+2. **Handler or domain service** calls `PolicyEnforcer.access_scope(...)` / `access_scope_with(...)` with:
+   - `subject`: `SecurityContext.subject_id` + `subject_tenant_id`
+   - `action`: concrete action string from the permission catalog (§3.3.1)
+   - `resource.type`: GTS Type Identifier of the affected entity (§3.2.1)
+   - `resource.id`: entity UUID
+   - `context.token_scopes`: from `SecurityContext`
+3. **PolicyEnforcer** obtains the PDP decision and returns an `AccessScope`; repositories execute through `SecureConn` / `SecureTx`, never raw database connections
+4. **Fail-closed**: PDP unavailability or timeout → `403 Forbidden`; no partial fallback
+
+**Tenant isolation (defense-in-depth)**: Every tenant-scoped database query includes a `tenant_id` predicate derived from the request's authorized context tenant / resource tenant and constrained by the PDP-returned `AccessScope`; it is enforced at the ORM layer independently of any handler-side filtering.
+
+#### 3.3.3 Eligibility vs. Platform Authorization
+
+> Implements `cpt-cf-approval-service-fr-validate-eligibility` and `cpt-cf-approval-service-fr-submit-decision`; the quorum layer below is governed by `cpt-cf-approval-service-fr-manage-policy` / `cpt-cf-approval-service-fr-evaluate-policy`.
+
+The Approval Service enforces two independent and orthogonal authorization layers:
+
+| Layer | Governed by | Checked when |
+|-------|-------------|-------------|
+| **Platform AuthZ — API access** | AuthZ Resolver (PDP) + permission catalog (§3.3.1) | Every API call — whether the caller may reach the service/endpoint at all |
+| **Approver authority — eligibility** | AuthZ Resolver (PDP): the `approve`/`reject`/`revoke` permission on the request's `req_type`, granted to roles in IAM (§3.3.1) | Decision submission — whether *this* subject may decide on *this* request (for the policy they decide under) |
+| **Domain quorum & constraints** | `ApprovalPolicy.min_approvals` + `mandatory_approvers` + `segregation_of_duties` + `allow_duplicate_approval` | Policy evaluation — whether the accumulated authorized decisions satisfy the policy |
+
+**Eligibility is PDP-driven, not stored on the policy (control is *not* inverted).** At decision submission the PEP calls the PDP `evaluate(subject, action ∈ {approve, reject, revoke}, resource = { type: req_type, id: request_id, tenant })`. A `decision: true` means the subject is an eligible approver; `false` rejects the decision with `403`. The decision is recorded against the specific matched policy the subject is deciding under (per-policy decisions, §3.1.5). The Approval Service therefore does **not** store or evaluate `eligible_roles`/`eligible_users` — authority is granted to roles in platform IAM and resolved by the PDP. The outcome (authorized / not) is captured in the decision's `auth_context` so the Policy Evaluation Engine can later count only authorized approvals deterministically.
+
+**Mandatory approvers** remain a domain quorum constraint, layered *on top of* PDP authority: each subject in `mandatory_approvers` must (a) independently pass the PDP `approve` check and (b) actually cast an approval. The list does not grant authority.
+
+**Segregation of Duties**: When `segregation_of_duties: true`, `SecurityContext.subject_id` of the decision submitter is compared against the `requester_id` stored at request creation. A match rejects the decision regardless of PDP authority.
+
+**Revoke eligibility**: `Revoke` is a request-level decision (it targets the request's `Approved` *state*, not another approver's individual `Approve` record — individual decisions are immutable). A `Revoke` is accepted only when **all** of the following hold:
+
+- `ApprovalPolicy.revocation_permitted = true`; otherwise the decision is rejected.
+- The submitter passes the PDP authority check for the `revoke` action on the request's `req_type` (the same PDP-driven eligibility model as `approve`, §3.3.3). Any subject the PDP authorizes may revoke — not only approvers who participated in the current round; an unauthorized subject may never revoke.
+- `segregation_of_duties` still applies (the requester cannot revoke their own request unless permitted).
+- Approval Administrators may revoke any request via the `request_override` permission (§3.3.1), independent of policy eligibility, with a mandatory audit event.
+
+The threshold is **veto-style and asymmetric to approval**: a single valid `Revoke` moves an `Approved` request to `Revoked` regardless of `min_approvals` (mirroring a single `Reject` vetoing a `PendingApproval` request). See §3.4.1.
+
+#### 3.3.4 `auth_context` in Approval Decision
+
+The `auth_context` JSON field captures a snapshot of the authentication context at decision time for permanent audit correlation. Required fields:
+
+```json
+{
+  "subject_id":         "<UUID — from SecurityContext.subject_id>",
+  "subject_tenant_id":  "<UUID — from SecurityContext.subject_tenant_id>",
+  "subject_type":       "<GTS Type Identifier or null — from SecurityContext.subject_type>",
+  "token_scopes":       ["<scope strings — from SecurityContext.token_scopes>"],
+  "pdp_action":         "approve",
+  "pdp_resource_type":  "<req_type GTS Type Identifier>",
+  "policy_version_id":  "<UUID — the matched policy this decision is cast for>",
+  "pdp_decision":       true,
+  "pdp_constraints_hash": "<stable hash of PDP constraints, if returned>",
+  "decision_timestamp": "<ISO 8601>"
+}
+```
+
+**Security constraint**: `bearer_token` is **never** captured in `auth_context`. The `secrecy::Secret<String>` wrapping on `SecurityContext.bearer_token` ensures it is not serialized into persistent storage. Any code path that writes `auth_context` must exclude the token.
+
+For `AutoApprove` / plugin-rendered decisions, `auth_context` uses the Approval Service system subject and records the **deciding plugin instance id**, the matched `auto_rule_id`, and the evaluated CEL expression instead of a human PDP approval decision. Human decisions must include the PDP authorization snapshot above (plus the `policy_version_id` they were cast for) so later evaluation and audit review can distinguish "authorized when cast" from any later IAM role changes.
+
+#### 3.3.5 Service-to-Service Authentication
+
+Integrated Services authenticate via the platform S2S flow (`cpt-cf-approval-service-actor-service`, PRD §11 Assumption):
+
+1. Service calls `AuthNResolverClient::exchange_client_credentials(ClientCredentialsRequest)` using their service account credentials
+2. The resulting `SecurityContext.subject_type` identifies the caller as a service account
+3. All subsequent API calls carry the access token from the credential exchange
+4. The Approval Service PDP evaluates the service's permissions against the permission catalog (§3.3.1) — no special service bypass
+
+#### 3.3.6 Round Lifecycle & Policy Re-binding
+
+A request progresses through one or more **evaluation rounds** (`current_round`, see §3.1.3):
+
+1. Round 1 begins at creation; `matched_policy_versions` is bound to the set of matched, active policy versions (scope matching, §3.1.2).
+2. While the round is open, decisions accumulate and the Policy Evaluation Engine counts only decisions tagged with `current_round`, grouped by the policy each was cast for.
+3. A terminal-for-round transition (`Reject` from `PendingApproval`, or `Revoke` from `Approved`) closes the round. Its decisions and `matched_policy_versions` are preserved immutably in the audit log.
+4. On re-entry to `PendingApproval`, `current_round` is incremented and the request is **re-matched**: `matched_policy_versions` is re-bound to the policy versions active at that instant. Therefore a reject/revoke → re-approve loop is always evaluated against the *current* set of policies and can never bypass a policy that was tightened or added in the interim, while in-flight (still-open) rounds remain immutable per `cpt-cf-approval-service-fr-version-policy`.
+
+This reconciles policy-snapshot immutability with revocation: immutability is guaranteed *within* a round; crossing a round boundary is an explicit, audited re-binding rather than a retroactive change to an in-flight request.
+
+### 3.4 Component Model
+
+**ID**: `cpt-cf-approval-service-component-policy-evaluation-engine`
+
+#### 3.4.1 Policy Evaluation Engine
+
+The engine computes the request status after request creation and every decision event by evaluating three decision layers **in order — optional Plugins (§3.1.7) → Auto-Approval (§3.1.6) → Policy quorum + manual approvals (§3.1.3/§3.1.5)** — short-circuiting on the first decisive outcome. Plugins are not required; when configured and eligible, they run **first** (`cpt-cf-approval-service-fr-evaluate-policy`, `cpt-cf-approval-service-fr-delegate-decision`, `cpt-cf-approval-service-fr-request-lifecycle`).
+
+**Inputs**: `ApprovalRequest`, the eligible plugins (matched by `scope_refs`), the matched, effective auto-approval predicate, the set of `ApprovalPolicy` snapshots in `matched_policy_versions`, and all `ApprovalDecision` records (each tagged with the `policy_version_id` it was cast for).
+
+**Algorithm** (executed atomically with each decision write — see §3.4.5):
+
+The engine evaluates **three layers in strict order — Plugins → Auto-Approval → Policy** — and short-circuits on the first decisive outcome:
+
+```
+0. Scope to the current round:
+   - Consider only decisions where decision.round = request.current_round
+     (prior-round decisions are preserved for audit but never counted)
+
+=== LAYER 1 — OPTIONAL PLUGINS (run first when configured, §3.1.6) ===
+1. Select eligible plugins: every configured plugin whose scope_refs match the request
+   by req_type. If none match, continue to layer 2.
+   Invoke eligible plugins in ModKit priority order.
+   - First plugin returning a TERMINAL decision wins and short-circuits:
+       FORCED_APPROVAL → status = Approved  (system AutoApprove decision recorded); STOP
+       NOT_APPROVED    → status = Rejected  (system Reject decision recorded); STOP
+   - Record APPROVED results as satisfied system AND-terms; IGNORE contributes nothing
+   - If no plugin is decisive → fall through to the normal approval check (layers 2–3)
+
+2. Request-level veto (human):
+   - Any valid human Reject (eligible approver, current round) → status = Rejected; STOP
+   - Any valid Revoke when status = Approved (eligible, policy.revocation_permitted) →
+     status = Revoked; STOP
+     (veto-style: a single Reject/Revoke is decisive regardless of any min_approvals)
+
+=== LAYER 2 — AUTO-APPROVAL (CEL, §3.1.5/§3.4.3) ===
+3. Evaluate the effective auto-approval predicate for the request
+   (matched, active rules ∩ ancestor rules, restrict-only):
+   - If it matches → status = Approved (system AutoApprove decision recorded); STOP
+   - Else → continue to policy
+
+=== LAYER 3 — POLICY QUORUM + MANUAL APPROVALS (§3.1.2/§3.1.4) ===
+4. Per-policy evaluation (ALL matched policies must pass — logical AND):
+   for each policy P in matched_policy_versions:
+     a. Collect decisions cast FOR P this round with decision_type = Approve
+        - Exclude submitters not PDP-authorized for `approve` (auth_context, §3.3.3)
+        - If P.segregation_of_duties: exclude decisions from request.subject
+        - If not P.allow_duplicate_approval: dedupe per approver_id (latest wins)
+     b. valid_count[P] = |collected approvals for P|
+     c. P.satisfied = valid_count[P] >= P.min_approvals
+                      AND every P.mandatory_approvers has a valid Approve for P
+
+5. status = Approved  iff  every matched policy P is satisfied
+                          AND every APPROVED plugin AND-term is satisfied (they are, by step 1)
+          else PendingApproval
+   (non-terminal plugins never upgrade a pending request to Approved)
+
+6. Compute unmet_requirements (per unsatisfied policy):
+    - for each unsatisfied policy P:
+        remaining_approvals_needed[P] = max(0, P.min_approvals − valid_count[P])
+        unsatisfied_mandatory_approvers[P] = mandatory_approvers w/o a valid Approve for P
+    - aggregate the request as PendingApproval while any matched policy is unsatisfied
+```
+
+**Threshold semantics** (`cpt-cf-approval-service-fr-request-lifecycle`): if an eligible plugin returns `FORCED_APPROVAL`, it short-circuits to `Approved`; if it returns `NOT_APPROVED`, it short-circuits to `Rejected`. If no plugin is configured, no plugin is eligible, or all eligible plugins return non-terminal decisions, a matching auto-approval rule approves; otherwise approval is **cumulative per policy and conjunctive across policies** — `Approved` requires *every* matched policy to reach its own quorum, AND-combined with any plugin `APPROVED` term. `Reject`/`Revoke` are **veto-style** (a single valid decision is decisive). `IGNORE` simply defers (§3.1.7).
+
+#### 3.4.2 Verification API Design
+
+The verification endpoint is the primary integration point for all downstream consumers (`cpt-cf-approval-service-fr-verify-approval`).
+
+**Cache design** (required for `cpt-cf-approval-service-nfr-latency` — 50ms p95):
+
+- Cache key: `(tenant_id, req_type_uuid, subject_resource_hash)` — the active-request uniqueness key (§3.1.4); `subject_resource_hash` is a deterministic hash of the canonicalized subject/resource payload
+- Cache entry: full verification response including `matched_policy_versions`, `decision_version`, `status`, `unmet_requirements`, `decision_history`
+- Invalidation: synchronously on every `StatusChanged` audit event for the matching request; a short bounded TTL (≤ 5s, configurable) caps the worst-case staleness window if an invalidation event is missed
+- Tenant hierarchy resolution is cached separately per tenant path, invalidated on Tenant Service structure-change events
+
+**Consistency model** (resolves the determinism-vs-cache tension): “Deterministic” means the result is a pure function of `(matched_policy_versions, current_round, decision set, plugin verdicts, evaluation time)` — caching never alters the computed value, it only memoizes it. Without `create_if_required`, verification does not invoke plugins and never creates requests or decisions.
+
+- **`decision_version` / ETag**: every response carries a monotonically increasing `decision_version` (incremented on each status-affecting write). Consumers gating security-critical actions can pass `If-Match: <decision_version>` / a `min_decision_version` query param; a stale cache entry below that version forces a strong read.
+- **Bounded staleness**: the maximum staleness is the TTL backstop above; within it a just-revoked/rejected request may still read as `Approved` only until invalidation or TTL expiry.
+- **Fail-closed**: on cache/backing-store unavailability the endpoint returns an error (not a stale `Approved`); consumers treat any non-`Approved`/error result as not-approved.
+
+**Lazy expiration at read time** (`cpt-cf-approval-service-fr-verify-approval`): Although active background expiration enforcement is out of scope (PRD §4.2), verification evaluates `expiration_rules` **lazily at read time**. If a request is stored as `Approved` but its effective deadline has passed, verification reports it as **`Expired` / not-approved** (and never returns a stale `Approved` for an expired authorization). This keeps the gate correct without a background sweeper.
+
+**Verification input and order** (`cpt-cf-approval-service-fr-verify-approval`): verification is **read-only by default**. The caller sends either a `request_id` or the **approval request body** (`type`, `tenant`, `subject`, `resource`) — the same shape used to create requests. The service resolves:
+
+1. **Request type** — unknown type or schema mismatch → `invalid`.
+2. **Policies** — no active policy matches in the tenant or its ancestors (§3.1.9) → `not_required`, reason `no_policy`; stop.
+3. **Active request** — the single non-terminal request for `(tenant_id, req_type, subject/resource payload)` (unique, §3.1.3/§3.9) in the tenant or its ancestors, with hierarchy rules below. Terminal historical requests are returned in history but never decide the result.
+4. **No request** → `approval_required`, unless the caller set `create_if_required`.
+
+**`create_if_required` (opt-in)**: in step 4 only, the service creates the request in the same transaction and runs the verdict flow (§3.8.3), so auto-approval can return `approved` at once. Rules:
+
+- Only when no active request exists. `denied` / `revoked` / `expired` are returned as they are; asking again needs an explicit reset.
+- Body target only (a `request_id` gives nothing to create from).
+- The caller needs the `request_create` permission in addition to `status_verify`. The requester is the `SecurityContext` subject.
+- Concurrent calls are safe: the `uq_active_request` index (§3.9) makes the second call return the request created by the first.
+
+| Outcome | `may_proceed` | Source |
+|---------|---------------|--------|
+| `not_required` | true | No matching active policy, reason `no_policy` (§3.1.9) |
+| `approved` | true | Request status `Approved`, not expired |
+| `approval_required` | false | No active request |
+| `pending` / `denied` / `withdrawn` / `expired` / `revoked` | false | Request status `PendingApproval` / `Rejected` / `Cancelled` / `Expired` / `Revoked` |
+| `invalid` | false | Unknown request type or schema mismatch |
+| `unavailable` | false | Any dependency or store failure (fail closed) |
+
+**Tenant hierarchy traversal** (`cpt-cf-approval-service-fr-tenant-hierarchy`, p1): Verification always resolves through the tenant hierarchy by calling the Tenant Resolver to enumerate ancestor tenants and collecting approval records at each level. Restrict-only semantics: if any ancestor tenant has a **block** for the same `(req_type, subject/resource payload)`, the child result is blocked regardless of child-tenant approvals. A *block* is represented as an ancestor-tenant request for the same `(req_type, subject/resource payload)` in `Rejected`/`Revoked` status (or an ancestor plugin returning `NOT_APPROVED`, or a disabled ancestor auto-approval rule); blocks propagate downward and a descendant cannot override them. This is the restrict-only counterpart to additive status inheritance.
+
+#### 3.4.3 Auto-Approval Evaluation
+
+Auto-approval is the **second layer** of the engine (after plugins, before policy quorum, §3.4.1), evaluated natively by the engine — **not** by a plugin (`cpt-cf-approval-service-fr-auto-approval`). It runs only when no eligible plugin returned a terminal decision:
+
+1. Load active `Auto-Approval Rules` whose `scope_refs` match the request `req_type` (version-matched, §3.1.2) for `tenant_id` and all ancestor tenants
+2. Compute the **effective predicate** as the intersection (logical AND) of the tenant's own and all ancestor rules' CEL expressions (restrict-only, §3.1.5); if any ancestor disables auto-approval, no auto-approval can occur
+3. Evaluate each CEL expression against the **approval request** object (`type`, `tenant`, `subject`, `resource`) using `cel-interpreter`
+4. On match (all effective predicates true): create an `ApprovalDecision` with `decision_type = AutoApprove`, `actor_type = Service`, `policy_version_id` covering each matched policy (or a synthetic auto-approval marker), recording the matched CEL in `auth_context`, and set `status = Approved` (skips the policy layer). Emit the `auto_approved` audit + outbox event (§3.2.3).
+5. On no match or CEL compile/eval failure: continue to the policy layer (a broken rule never blocks; it simply does not match).
+
+#### 3.4.4 Event Emission
+
+Events are emitted to the platform event bus for the state transitions required by `cpt-cf-approval-service-fr-event-notifications` (p3):
+
+| Trigger | Emitted Event Type |
+|---------|----------------------|
+| Request created | `gts.cf.core.events.type.v1~cf.core.approval.request_created.v1~` |
+| Request auto-approved | `gts.cf.core.events.type.v1~cf.core.approval.auto_approved.v1~` |
+| Request approved | `gts.cf.core.events.type.v1~cf.core.approval.status_changed.v1~` |
+| Request rejected | `gts.cf.core.events.type.v1~cf.core.approval.status_changed.v1~` |
+| Request revoked | `gts.cf.core.events.type.v1~cf.core.approval.status_changed.v1~` |
+| Policy updated | `gts.cf.core.events.type.v1~cf.core.approval.policy_updated.v1~` |
+
+**Durability (outbox pattern)**: Event records are written to an outbox table in the **same database transaction** as the triggering state mutation (decision write, status update, policy change). An event dispatcher drains the outbox at-least-once to the platform event bus. This guarantees no event is silently dropped under partial failures or process crashes.
+
+**Bulk approval**: For bulk operations (`cpt-cf-approval-service-fr-bulk-approve`), one `status_changed` event is emitted per approved resource (not one aggregate event), enabling per-resource cache invalidation in downstream services.
+
+#### 3.4.5 Decision Atomicity
+
+Each decision submission and its resulting status transition commit as a single atomic database transaction (`cpt-cf-approval-service-nfr-atomicity`):
+
+1. INSERT `ApprovalDecision` record (tagged with the `policy_version_id` it was cast for)
+2. Run Policy Evaluation Engine (§3.4.1): Plugins → Auto-Approval → Policy, in order. Plugins invoked on the write path must complete within the transaction's plugin-call budget; a plugin timeout/error follows the fail-closed rule (§3.1.6). Any system decision (plugin `AutoApprove`/`Reject`, or auto-approval `AutoApprove`) is INSERTed in the same transaction
+3. UPDATE `ApprovalRequest.status` and `updated_at`
+4. PUBLISH append-only approval audit event to the Cyber Ware audit module topic
+5. INSERT outbox event record (§3.4.4)
+
+All effects succeed together or none apply. The audit event stream is therefore always consistent with the request status. Partial writes are impossible by construction.
+
+**Bulk approval atomicity** (`cpt-cf-approval-service-fr-bulk-approve`): The entire batch is wrapped in a single transaction. Full success or full rollback — no partial-batch state. Each item is checked with the same rules as a single decision. If any item fails, the transaction rolls back and the response lists each item with its state and reason; no events are emitted. On success, one `status_changed` event is emitted per item (§3.4.4).
+
+#### 3.4.6 Audit Log Immutability
+
+Audit log immutability is enforced through the dedicated Cyber Ware audit module (`cpt-cf-approval-service-nfr-audit-immutability`, `cpt-cf-approval-service-fr-audit-trail`):
+
+- **Approval Service layer**: No endpoint exists for updating or deleting audit events; all approval mutations emit append-only audit event payloads
+- **Audit module layer**: The dedicated Cyber Ware audit module owns durable storage, retention, partitioning, topic publication, and any database-level immutability controls
+- **Contract layer**: Approval audit event payloads include immutable event metadata (`timestamp`, `actor_id`, `actor_type`, `tenant_id`, `source_system`, `event_type`) and target state transition data; consumers never mutate emitted events
+
+#### 3.4.7 Phased Delivery of the Evaluation Layers
+
+The three evaluation layers (§3.4.1) are delivered incrementally. Earlier phases are functional on their own because each layer short-circuits independently and a request with no matching rule in a not-yet-delivered layer simply falls through.
+
+| Phase | Capability | Engine layers active | Notes |
+|-------|------------|----------------------|-------|
+| **p1** | **Request lifecycle + optional plugins** | Layer 1 when plugins are configured | Supports request creation/verification, `no_policy` and default policies (§3.1.9), tenant hierarchy in verification (§3.4.2), the client SDK (§3.4.8), and optional plugin callbacks. If no plugin is eligible, the request remains governed by its lifecycle state until later layers are configured. |
+| **p2** | **+ Auto-approvals (CEL)** | Layers 1–2 | Adds native CEL auto-approval (§3.4.3). Eligible plugins, if configured, still run first; otherwise requests fall through to auto-approval. |
+| **p3** | **+ Approval policies & manual approvals** | Layers 1–3 | Adds the per-policy quorum engine, manual decision submission, eligibility (PDP), segregation-of-duties, mandatory approvers, and rounds (§3.1.2/§3.1.4/§3.3). |
+
+The evaluation order (optional Plugins → Auto-Approval → Policy) is **fixed across all phases**; phases only change which layers have data to act on.
+
+#### 3.4.8 Client SDK
+
+`approval-service-sdk` gives gears a `may_proceed` answer in one call (`cpt-cf-approval-service-interface-sdk`). The client is registered in ClientHub without scope.
+
+```rust
+/// Any `Err` is a refusal: never proceed on an error.
+#[async_trait]
+pub trait ApprovalClientV1: Send + Sync {
+    /// Gets the verdict. Uses the local cache unless `opts.fresh`;
+    /// a cache hit makes no network call.
+    async fn check(
+        &self,
+        ctx: &SecurityContext,
+        target: &ApprovalTarget,
+        opts: CheckOptions,
+    ) -> Result<Verdict, ApprovalError>;
+
+    /// One-line gate for fast paths: default options, `false` on any error.
+    async fn may_proceed(&self, ctx: &SecurityContext, target: &ApprovalTarget) -> bool {
+        matches!(self.check(ctx, target, CheckOptions::default()).await, Ok(v) if v.may_proceed)
+    }
+}
+
+#[derive(Default)]
+pub struct CheckOptions {
+    /// Skip the local cache. Use for high-impact operations.
+    pub fresh: bool,
+    /// Create the request when none exists (§3.4.2). Opt-in. Never served from cache.
+    pub create_if_required: bool,
+}
+
+pub enum ApprovalTarget {
+    Request(Uuid),
+    Body { req_type: GtsTypeId, tenant: Uuid, subject: serde_json::Value, resource: serde_json::Value },
+}
+
+pub struct Verdict {
+    pub may_proceed: bool,
+    pub outcome: Outcome,
+    pub request_id: Option<Uuid>,
+    pub reason: Option<String>,
+    pub decision_version: u64,
+    pub expires_at: Option<OffsetDateTime>,
+}
+
+pub enum Outcome {
+    NotRequired, Approved, ApprovalRequired, Pending,
+    Denied, Withdrawn, Expired, Revoked, Invalid, Unavailable,
+}
+```
+
+Typical gear code:
+
+```rust
+if !approvals.may_proceed(&ctx, &target).await {
+    return Err(DomainError::ApprovalRequired);
+}
+```
+
+The gear does not compute fingerprints, manage tokens, resolve tenants, or subscribe to events. The SDK does this.
+
+**Cache rules**:
+
+- **Key**: `request_id`, or `(tenant_id, req_type, subject_resource_hash)` for a body. The SDK computes the same canonical hash as the service (§3.9).
+- **What is cached**: positive verdicts (`NotRequired`, `Approved`) up to the TTL below. Other outcomes are cached for at most 5s (configurable) to absorb bursts. Errors are never cached.
+- **TTL**: default 10s, configurable per `req_type`, never past `expires_at`. The TTL is only a backstop for missed events.
+- **Invalidation by events**: the SDK subscribes to approval events (§3.4.4). Events drop positive **and** negative entries, so a user who was just approved does not wait for the negative TTL.
+  - `status_changed` / `auto_approved`: drop entries with the same `request_id`, or the same `(req_type, subject_resource_hash)` in any tenant, because an ancestor change affects child tenants.
+  - `policy_updated`: drop all entries for that `req_type` (a new or removed policy changes `not_required`).
+  - Event stream gap or disconnect: clear the whole cache.
+- **Version guard**: an entry is dropped when an event carries a higher `decision_version`.
+- **Single flight**: concurrent misses for the same key share one remote call.
+- **Fail closed**: timeout, error, or unknown outcome → `may_proceed = false`.
+
+Event payloads therefore carry `request_id`, `tenant_id`, `req_type`, `subject_resource_hash`, and `decision_version`.
+
+### 3.5 API Contracts
+
+> Detailed OpenAPI 3.0 specification is the authoritative contract. This section describes the endpoint surface for traceability against PRD §7.1 (`cpt-cf-approval-service-interface-rest-api`).
+
+#### 3.5.1 REST Endpoint Summary
+
+| Method | Path | FR | Actor |
+|--------|------|----|-------|
+| POST | `/v1/approval-request-types` | `cpt-cf-approval-service-fr-register-req-type` | Integrated Service, Admin |
+| GET | `/v1/approval-request-types/{id}` | `cpt-cf-approval-service-fr-register-req-type` | Admin, Integrated Service |
+| POST | `/v1/approval-policies` | `cpt-cf-approval-service-fr-manage-policy` | Admin |
+| GET | `/v1/approval-policies/{id}/versions/{version}` | `cpt-cf-approval-service-fr-version-policy` | Admin |
+| POST | `/v1/approval-requests` | `cpt-cf-approval-service-fr-create-request` | Integrated Service, Requester |
+| GET | `/v1/approval-requests/{id}` | `cpt-cf-approval-service-fr-request-lifecycle` | Requester, Approver, Admin, Integrated Service |
+| GET | `/v1/approval-requests` | `cpt-cf-approval-service-fr-request-lifecycle` | Approver, Admin, Integrated Service |
+| POST | `/v1/approval-requests/{id}/decisions` | `cpt-cf-approval-service-fr-submit-decision` | Approver |
+| POST | `/v1/approval-requests/{id}/cancel` | `cpt-cf-approval-service-fr-request-lifecycle` | Requester (own), Admin |
+| POST | `/v1/approval-requests/{id}/override` | `cpt-cf-approval-service-fr-administration` | Admin |
+| POST | `/v1/approval-requests:bulk-approve` | `cpt-cf-approval-service-fr-bulk-approve` | Admin, Approver |
+| POST | `/v1/approvals:verify` | `cpt-cf-approval-service-fr-verify-approval` | Integrated Service |
+| GET | `/v1/audit-events` | `cpt-cf-approval-service-fr-audit-trail` | Admin |
+| POST | `/v1/auto-approval-rules` | `cpt-cf-approval-service-fr-auto-approval` | Admin |
+| PATCH | `/v1/auto-approval-rules/{id}` | `cpt-cf-approval-service-fr-auto-approval` | Admin |
+| GET | `/v1/approval-plugins` | `cpt-cf-approval-service-fr-delegate-decision` | Admin |
+| POST | `/v1/approval-plugins` | `cpt-cf-approval-service-fr-delegate-decision` | Admin |
+| PATCH | `/v1/approval-plugins/{id}` | `cpt-cf-approval-service-fr-delegate-decision` | Admin |
+
+> **Decision submission** (`POST .../decisions`) carries the `policy_version_id` the approver is deciding under (per-policy decisions, §3.1.4). **Policy**, **auto-approval-rule**, and **plugin** registration/update bodies carry request-type `scope_refs` (1..many `req_type` GTS ids, §3.1.2) declaring which requests they apply to; for plugins the body also carries the plugin instance id, `priority`, and `enabled`. **Verification** is a `POST` that accepts a `request_id` or the **approval request body** (`type`, `tenant`, `subject`, `resource`), plus an optional `create_if_required` flag; it returns an outcome per §3.4.2. It is read-only unless the flag is set.
+
+#### 3.5.2 Verification Response Shape
+
+```json
+{
+  "outcome": "pending",
+  "may_proceed": false,
+  "reason": "policy_unsatisfied",
+  "status": "PendingApproval",
+  "request_id": "<uuid>",
+  "matched_policy_versions": ["<uuid-compliance>", "<uuid-security>"],
+  "decision_version": 7,
+  "current_round": 1,
+  "expires_at": "2025-12-31T00:00:00Z",
+  "per_policy": [
+    {
+      "policy_version_id": "<uuid-compliance>",
+      "satisfied": true,
+      "remaining_approvals_needed": 0,
+      "unsatisfied_mandatory_approvers": []
+    },
+    {
+      "policy_version_id": "<uuid-security>",
+      "satisfied": false,
+      "remaining_approvals_needed": 1,
+      "unsatisfied_mandatory_approvers": ["<security-lead-uuid>"]
+    }
+  ],
+  "decision_history": [
+    {
+      "decision_id": "<uuid>",
+      "policy_version_id": "<uuid-compliance>",
+      "approver_id": "<subject_id>",
+      "decision_type": "Approve",
+      "comment": "Compliance OK",
+      "created_at": "2025-09-20T14:30:00Z"
+    }
+  ]
+}
+```
+
+For `not_required`, `approval_required`, `invalid`, and `unavailable`, request fields (`status`, `request_id`, `per_policy`, `decision_history`) are absent. The request is `Approved` only when **every** entry in `per_policy` is `satisfied` (or a plugin returned `FORCED_APPROVAL`), and no plugin returned `NOT_APPROVED`. Fields map directly to the evaluation output from §3.4.1. The response schema is stable; additive fields are backward-compatible (`cpt-cf-approval-service-contract-verification`).
+
+#### 3.5.3 Configuration Examples
+
+These examples are implementable with the current design because it separates:
+
+- **Request Type** (`req_type`): the GTS type that defines the request schema + explicit `subject` and `resource` blocks; the protected object's identity lives in `resource.metadata`
+- **Policy**: quorum/constraint rules scoped directly to request types (1..many); **all matched policies AND together**
+- **PDP/IAM**: who may approve/reject/revoke a given `req_type`
+- **Auto-approval rule (CEL)**: optional CEL predicate over the approval request that can skip human review
+- **Plugins**: optional decision callbacks returning `FORCED_APPROVAL`/`APPROVED`/`NOT_APPROVED`/`IGNORE`
+
+**LLM Gateway grants access to frontier models (the model lives in resource.metadata)**
+
+Define one request type:
+
+```text
+req_type:  gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~
+           (subject.metadata schema: { plan_tier })
+           (resource.metadata schema: { model_provider, model_name })
+```
+
+The LLM Gateway checks approval by submitting the approval request body:
+
+```text
+POST /v1/approvals:verify
+{
+  "type":     "gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~",
+  "tenant":   "5679…",
+  "subject":  { "description": "Requester context", "metadata": { "plan_tier": "pro" } },
+  "resource": { "description": "Model access", "metadata": { "model_provider": "openai", "model_name": "gpt-5" } }
+}
+```
+
+If no active request matches `(tenant, req_type, subject/resource payload)`, verification returns `approval_required`. If the gateway calls `check` with `create_if_required` (§3.4.8), the request is created in the same call and the gateway gets `pending` with the `request_id`. Grant `approve` on the `req_type` through IAM/PDP to the model-governance approver role.
+
+**Compliance AND Security must both approve**
+
+Attach two independent policies to the same scope — both match, both must be satisfied (AND):
+
+```text
+policy "compliance": scope_refs=[gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~]
+                     min_approvals=1, mandatory_approvers=[compliance-officer]
+policy "security":   scope_refs=[gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~]
+                     min_approvals=1, mandatory_approvers=[security-lead]
+```
+
+An approver decides **per policy**: the compliance officer approves under `compliance` and the security lead approves under `security`. The request is `Approved` only once both policies are satisfied.
+
+**Policy applies to a request type and all newer minor versions**
+
+```text
+policy "v1.2+": scope_refs=[gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1.2~]
+```
+
+This matches request type minors `v1.2`, `v1.3`, … (not `v1.0`/`v1.1`, never `v2`). A major-only ref (`…model_access.v1~`) matches every minor of `v1` (§3.1.3).
+
+**Auto-approve OpenAI GPT-5; require approval for everything else**
+
+Add an auto-approval rule consumed by the default plugin:
+
+```text
+auto_rule: scope_refs=[gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~]
+           cel: metadata.model_provider == "openai" && metadata.model_name == "gpt-5"
+```
+
+Matching requests get a `FORCED_APPROVAL` → system `AutoApprove` decision → `Approved` (no other approvals needed). Non-matching requests (`IGNORE`) fall through to the matched policies. The blanket default rule (`CEL: true`, scope `*`) ships disabled; enabling it makes the default plugin auto-approve everything (dev/test only).
+
+### 3.6 Internal Dependencies
+
+| Service | SDK | Purpose |
+|---------|-----|----------|
+| authn-resolver | `authn-resolver-sdk` | Bearer token validation → `SecurityContext` |
+| authz-resolver | `authz-resolver-sdk::PolicyEnforcer` | PDP admission decisions + SQL-compilable constraints |
+| tenant-resolver | `tenant-resolver-sdk` | Tenant hierarchy traversal for verification and auto-approval rule scoping |
+| types-registry | `types-registry` client | Resolve/validate `req_type` schemas; policy/auto-rule version-range matching (§3.1.2) |
+
+**Library dependency**: CEL auto-approval uses the `cel-interpreter` crate (sandboxed, no I/O). Adding it follows [guidelines/DEPENDENCIES.md](../../../guidelines/DEPENDENCIES.md) (new third-party crate review).
+
+### 3.7 External Dependencies
+
+| Dependency | Purpose |
+|-----------|----------|
+| Postgres (`modkit-db`) | Persistent storage for Approval Service entities and outbox table |
+| Cyber Ware audit module | Durable append-only audit event topic, audit storage, retention, and query surface |
+
+### 3.8 Interactions & Sequences
+
+**ID**: `cpt-cf-approval-service-seq-decision-submission`
+
+#### 3.8.1 Decision Submission Flow
+
+```
+Approver → api-gateway → approval-service (PEP)
+                               ↓
+                          PolicyEnforcer → authz-resolver (PDP): evaluate(subject, decision_submit, request)
+                               ↓
+                          PolicyEnforcer → authz-resolver (PDP): evaluate(subject, approve|reject|revoke, req_type)
+                               ↓  (decision is cast for a specific matched policy_version_id)
+                          BEGIN TX
+                            INSERT approval_decisions (policy_version_id, round)
+                            evaluate engine: per-policy AND (§3.4.1)
+                              + plugins (priority; first FORCED_APPROVAL/NOT_APPROVED wins,
+                                         APPROVED AND-combined, IGNORE defers)
+                            INSERT any system plugin decisions (AutoApprove/Reject)
+                            UPDATE approval_requests.status
+                            PUBLISH approval audit event
+                            INSERT approval_event_outbox
+                          COMMIT
+                               ↓
+                          201 Created
+```
+
+#### 3.8.2 Verification Flow
+
+```
+Actor Y → LLM Gateway: request use of GPT-5
+  ↓
+LLM Gateway → approval-service-sdk: check(ctx, ApprovalTarget::Body{..}, CheckOptions { create_if_required: true, .. })
+  ↓
+SDK local cache lookup (§3.4.8):
+  key = (tenant_id, req_type_uuid, subject_resource_hash)
+  if cached positive verdict (NotRequired / Approved) is fresh:
+    return it to LLM Gateway (no network call)
+  else:
+    continue to remote verification (single flight per key)
+  ↓
+SDK → AuthN Resolver / token provider:
+  obtain or reuse service-to-service token for the LLM Gateway
+  ↓
+SDK → Approval Service:
+  POST /v1/approvals:verify
+    {
+      type:     gts.cf.core.approval.req_type.v1~cf.genai.llm_gateway.model_access.v1~,
+      tenant:   tenant,
+      subject:  { description: "Requester context", metadata: { plan_tier: "pro" } },
+      resource: { description: "Model access", metadata: { model_provider: "openai", model_name: "gpt-5" } }
+    }
+  ↓
+Approval Service AuthN Middleware:
+  validate bearer token and build SecurityContext
+  ↓
+Approval Service PEP:
+  PolicyEnforcer evaluates status_verify on req_type context
+  fail closed on deny, timeout, or missing PDP response
+  ↓
+Approval Service (§3.4.2):
+  find active policies matching req_type in the tenant or ancestors (§3.1.9)
+  (if none → return not_required, reason no_policy)
+  load active non-terminal request for (tenant or ancestors, req_type, subject/resource payload)
+  (if none → return approval_required; or, with create_if_required, create it and run §3.8.3)
+  load matched_policy_versions snapshot + current-round decisions (grouped per policy)
+  apply expiration + tenant hierarchy rules
+  ↓
+Approval Service → SDK:
+  return outcome, may_proceed, status, decision_version/ETag, matched_policy_versions, per_policy, expires_at
+  ↓
+SDK:
+  cache only positive verdicts (NotRequired / Approved), bounded by min(expires_at, positive TTL)
+  cache other outcomes for at most the short negative TTL; never cache errors
+  drop entries on approval events (rules in §3.4.8)
+  ↓
+LLM Gateway:
+  if may_proceed → allow Model X use
+  else → reject (tell the user if a request is pending)
+```
+
+This sequence is intentionally fail-closed: Approval Service error, AuthN/AuthZ failure, missing request, expired approval, or any outcome other than `not_required` / `approved` denies the protected operation. Positive cache entries are safe only because they are short-lived, tied to `decision_version`, and invalidated by approval events.
+
+#### 3.8.3 Approval Decision Verdict Flow
+
+This is the request-level execution order used when creating a request or recalculating status after a decision. Verification runs it only when `create_if_required` creates a request; otherwise it only reads stored status (§3.4.2):
+
+```mermaid
+sequenceDiagram
+    participant Client as Integrated Service / SDK
+    participant Gear as Approval Gear
+    participant PDP as AuthZ Resolver
+    participant Registry as GTS Registry
+    participant Plugin as Approval Gear Plugin
+
+    Client->>Gear: create approval request
+    Gear->>Gear: parse request body
+    Gear->>PDP: authorize caller for create on req_type
+    PDP-->>Gear: allow / deny
+    Gear->>Registry: resolve req_type and validate subject/resource schema
+    Registry-->>Gear: valid / invalid
+    Gear->>Gear: create request, or return the existing active request (idempotent); bind read-only fields
+    Gear->>Gear: select eligible plugins by scope_refs
+    alt eligible plugin exists
+        Gear->>Plugin: decide(request)
+        Plugin-->>Gear: FORCED_APPROVAL / APPROVED / NOT_APPROVED / IGNORE
+        Gear->>Gear: terminal plugin verdict short-circuits; non-terminal verdict continues
+    else no eligible plugin
+        Gear->>Gear: continue to auto-approval
+    end
+    Gear->>Gear: evaluate runtime CEL auto-approval rules
+    Gear->>Gear: evaluate policy quorum and human approvals
+    Gear-->>Client: status, request_id, decision_version, per_policy
+```
+
+#### 3.8.4 Approval Status Determination
+
+**ID**: `cpt-cf-approval-service-seq-status-determination`
+
+The single decision procedure run by the Policy Evaluation Engine (§3.4.1) after creation and after every decision event. Layers execute **in order** and the **first decisive layer wins**:
+
+```
+            ┌──────────────────────────────────────────────────────────┐
+            │            evaluate(ApprovalRequest, round)                │
+            └──────────────────────────────┬───────────────────────────┘
+                                           ▼
+        ╔════════════ LAYER 1 — OPTIONAL PLUGINS (run first) ═══════════════╗
+        ║ select eligible plugins = configured plugins whose scope_refs      ║
+        ║ match the request req_type                                        ║
+        ║ if no eligible plugin exists, continue to Layer 2                  ║
+        ║ for each eligible plugin, in priority order:                      ║
+        ║     d = plugin.decide(request)   // error/timeout ⇒ NOT_APPROVED  ║
+        ║     FORCED_APPROVAL ─────────────────────────────► status=Approved╫──► STOP
+        ║     NOT_APPROVED    ─────────────────────────────► status=Rejected╫──► STOP
+        ║     APPROVED        ⇒ record satisfied AND-term, keep scanning     ║
+        ║     IGNORE          ⇒ keep scanning                                ║
+        ╚══════════════════════════════════╤═══════════════════════════════╝
+                no terminal plugin decision │  (also: human Reject/Revoke ⇒ STOP)
+                                           ▼
+        ╔══════════════ LAYER 2 — AUTO-APPROVAL (CEL, p2) ══════════════════╗
+        ║ effective predicate = AND(matched active rules ∩ ancestor rules)  ║
+        ║ if predicate matches ────────────────────────────► status=Approved╫──► STOP
+        ║ else ⇒ continue                                                    ║
+        ╚══════════════════════════════════╤═══════════════════════════════╝
+                                no auto-approval match │
+                                           ▼
+        ╔══════════ LAYER 3 — POLICY QUORUM + MANUAL APPROVALS (p3) ════════╗
+        ║ for each matched policy P (AND across all):                       ║
+        ║   P.satisfied = valid_approvals(P) ≥ P.min_approvals              ║
+        ║                 AND all P.mandatory_approvers approved            ║
+        ║                 (SoD + duplicate rules applied, PDP-authorized)   ║
+        ║ if every P satisfied AND every plugin APPROVED-term satisfied     ║
+        ║      ───────────────────────────────────────────► status=Approved║
+        ║ else ─────────────────────────────────────► status=PendingApproval║
+        ╚═══════════════════════════════════════════════════════════════════╝
+                                           ▼
+                        commit status + decisions + audit + outbox (§3.4.5)
+```
+
+Phasing (§3.4.7): **p1** supports request lifecycle and optional Layer 1 plugins; **p2** adds Layer 2; **p3** adds Layer 3. The order never changes — phases only add data to later layers.
+
+### 3.9 Database schemas & tables
+
+Core tables (abbreviated; Diesel/SeaORM migrations are the authoritative schema):
+
+```sql
+approval_requests(
+  id UUID PRIMARY KEY,
+  req_type_uuid UUID NOT NULL,                 -- deterministic UUID v5 of req_type GTS id (exact version)
+  req_type_gts_id TEXT NOT NULL,               -- human-readable req_type GTS identifier
+  tenant_id UUID NOT NULL,
+  subject JSONB NOT NULL DEFAULT '{}',         -- validated against req_type.subject schema at creation
+  resource JSONB NOT NULL DEFAULT '{}',        -- validated against req_type.resource schema at creation
+  subject_resource_hash BYTEA NOT NULL,        -- deterministic hash of canonicalized subject/resource payload (uniqueness key)
+  status TEXT NOT NULL,
+  current_round INT NOT NULL DEFAULT 1,         -- evaluation round; reset boundary for re-approval
+  decision_version BIGINT NOT NULL DEFAULT 0,  -- monotonic; bumped on each status-affecting write (ETag)
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+)
+
+-- At most one non-terminal request per (tenant, req_type, canonicalized subject/resource payload) → unambiguous verification
+CREATE UNIQUE INDEX uq_active_request
+  ON approval_requests (tenant_id, req_type_uuid, subject_resource_hash)
+  WHERE status IN ('Draft', 'PendingApproval', 'Approved')
+
+-- Snapshot of matched policy versions per round (re-matched at each new round)
+approval_request_policies(
+  request_id UUID NOT NULL REFERENCES approval_requests,
+  round INT NOT NULL,
+  policy_id UUID NOT NULL,
+  policy_version INT NOT NULL,
+  PRIMARY KEY (request_id, round, policy_id)
+)
+
+approval_decisions(
+  id UUID PRIMARY KEY,
+  request_id UUID NOT NULL REFERENCES approval_requests,
+  policy_id UUID NOT NULL,                      -- the matched policy this decision is cast for (per-policy decisions)
+  policy_version INT NOT NULL,
+  approver_id UUID NOT NULL,                    -- system service-account id for plugin/AutoApprove
+  decision_type TEXT NOT NULL,                 -- Approve | Reject | Revoke | AutoApprove
+  round INT NOT NULL,                          -- evaluation round this decision was cast in
+  comment TEXT,
+  auth_context JSONB NOT NULL,                  -- incl. policy_version_id and (for plugins) plugin instance id + CEL
+  created_at TIMESTAMPTZ NOT NULL
+)
+
+CREATE INDEX idx_decisions_request_round_policy
+  ON approval_decisions (request_id, round, policy_id)
+
+-- Policies: versioned, freely overlapping; scope is a separate 1..many table
+approval_policies(
+  id UUID PRIMARY KEY,                          -- default policies: UUID v5 of the config `name` (§3.1.9)
+  tenant_id UUID NOT NULL,                      -- also applies to descendant tenants
+  version INT NOT NULL,
+  min_approvals INT NOT NULL,
+  mandatory_approvers UUID[] NOT NULL DEFAULT '{}',
+  expiration_rules JSONB,
+  revocation_permitted BOOLEAN NOT NULL DEFAULT false,
+  segregation_of_duties BOOLEAN NOT NULL DEFAULT false,
+  allow_duplicate_approval BOOLEAN NOT NULL DEFAULT false,
+  comment_requirements TEXT NOT NULL DEFAULT 'None',
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (id, version)
+)
+
+-- Scope refs (1..many) for policies, auto-rules AND plugins; target is a req_type GTS type
+-- minor_version NULL => major-only ref (matches any minor of the major)
+-- minor_version set  => matches that minor and all newer minors of the same major
+approval_scope_refs(
+  id UUID PRIMARY KEY,
+  owner_kind TEXT NOT NULL,                     -- 'policy' | 'auto_rule' | 'plugin'
+  owner_id UUID NOT NULL,                       -- for 'plugin': the registered plugin instance id
+  target_kind TEXT NOT NULL DEFAULT 'req_type',
+  target_type_uuid UUID NOT NULL,              -- UUID v5 of the (major) GTS type id
+  target_gts_id TEXT NOT NULL,
+  major_version INT NOT NULL,
+  minor_version INT                            -- NULL = major-only
+)
+
+CREATE INDEX idx_scope_refs_target
+  ON approval_scope_refs (target_kind, target_type_uuid, major_version)
+
+auto_approval_rules(
+  id UUID PRIMARY KEY,
+  tenant_id UUID NOT NULL,
+  cel_expression TEXT,                          -- optional CEL; NULL/'' => unconditional match
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+)
+
+CREATE INDEX idx_auto_rules_tenant ON auto_approval_rules (tenant_id)
+
+approval_event_outbox(
+  id UUID PRIMARY KEY,
+  event_type_uuid UUID NOT NULL,
+  event_type_gts_id TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  dispatched_at TIMESTAMPTZ
+)
+```
+
+> Approval **plugins** are optional GTS ModKit plugin instances registered with `types-registry` and `ClientHub` at startup (not their own Approval-Service table). At registration each plugin instance declares its association via `approval_scope_refs` rows with `owner_kind = 'plugin'` (1..many `req_type` refs); when plugins are configured, **all plugins whose scope matches a request are invoked** (§3.1.6). Request type **schemas** are owned by the Type Registry; the Approval Service stores only their UUID/GTS-id references. Plugin/policy/auto-rule **scope version-range matching** is resolved via the registry + `approval_scope_refs.major_version`/`minor_version`, never via SQL `LIKE`.
+
+### 3.10 NFR Allocation
+
+> Maps non-functional requirements from [PRD §6](./PRD.md#6-non-functional-requirements) to specific design responses.
+
+| NFR ID | NFR Summary | Threshold | Allocated To | Design Response |
+|--------|-------------|-----------|--------------|-----------------|
+| `cpt-cf-approval-service-nfr-latency` | Verification ≤ 50ms p95 | ≤ 50ms p95 | SDK cache (§3.4.8) + Verification API + Cache (§3.4.2) | SDK cache hits answer positive verdicts with no network call; matching active policies are cached per `(tenant path, req_type)` and dropped on `policy_updated`. Response cache keyed on `(tenant_id, req_type_uuid, subject_resource_hash)` avoids DB round-trips on cache hit; cache invalidated on `StatusChanged` events; tenant hierarchy pre-resolved and cached. The `status_verify` **access** check (§3.3.1) is always enforced (fail-closed) but is itself cacheable per request context; only the per-request **approver-eligibility** evaluation (the `approve`/`reject`/`revoke` PDP call, §3.3.3) is not needed on the read path — verification never approves, it only reports stored status |
+| `cpt-cf-approval-service-nfr-atomicity` | Zero partial writes | 0 partial-write scenarios | Database transaction (§3.4.5) | Decision + status + audit event publish + outbox committed in one atomic unit; no partial state possible under process crash or replication failure; bulk approval wrapped in single transaction |
+| `cpt-cf-approval-service-nfr-audit-immutability` | Append-only audit log | No delete/update endpoints for audit | Approval Service + Cyber Ware audit module (§3.4.6) | Approval Service emits immutable audit event payloads and exposes no mutation endpoint; durable audit storage, retention, partitioning, and database-level immutability controls are owned by the dedicated Cyber Ware audit module |
+| `cpt-cf-approval-service-nfr-availability` | 99.9% monthly uptime for create + decision endpoints | ≥ 99.9% monthly | Stateless handlers + DB HA | Stateless handler design enables horizontal scaling with no singleton dependencies on the critical write path; verification cache reduces read amplification; sweeper for expiration enforcement is non-critical to write availability |
+
+## 4. Traceability
+
+- **PRD**: [PRD.md](./PRD.md)
+- **Upstream Requirements**: [UPSTREAM_REQS.md](./UPSTREAM_REQS.md)
+- **ADRs**: None yet; approved decisions will be recorded in `docs/ADR/`.
+- **Features**: None yet; implementation specifications will be recorded in `docs/features/`.
+- **Auth Architecture**: [docs/arch/authorization/DESIGN.md](../../../docs/arch/authorization/DESIGN.md)
+- **Permission GTS Type**: [docs/arch/authorization/PERMISSION_GTS_TYPE.md](../../../docs/arch/authorization/PERMISSION_GTS_TYPE.md)
+- **GTS Guidelines**: [guidelines/GTS.md](../../../guidelines/GTS.md)

@@ -1,0 +1,99 @@
+{
+  "$id": "gts://gts.cf.core.approval.auto_approval_rule.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Auto-Approval Rule entity (p2, PRD cpt-cf-approval-service-fr-auto-approval). With effect 'approve', a matching enabled rule approves a request without human review where approval is required; it never overrides a deny rule or a deny decision, and it satisfies only policies whose scope tenant is the rule's scope tenant or a descendant. With effect 'block_descendants', the rule disables auto-approval of strict descendants of its scope tenant for matching opportunities. This type is the subject type of auto-approval rule change events (DESIGN cpt-cf-approval-service-entity-auto-approval-rule).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "scope_tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "opportunity_pattern": {
+      "type": "string",
+      "maxLength": 1024,
+      "x-gts-pattern-ref": "gts.cf.core.approval.opportunity.v1~"
+    },
+    "resource_selector": {
+      "description": "Exactly one of a projection type pattern or one specific projection.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projection_type_pattern": {
+          "type": "string",
+          "maxLength": 1024,
+          "x-gts-pattern-ref": "gts.cf.core.approval.projection.v1~"
+        },
+        "projection_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "projection_type_pattern"
+          ]
+        },
+        {
+          "required": [
+            "projection_id"
+          ]
+        }
+      ]
+    },
+    "subject_type_pattern": {
+      "type": "string",
+      "maxLength": 1024,
+      "x-gts-pattern-ref": "gts.*"
+    },
+    "condition": {
+      "description": "Optional CEL condition over opportunity, subject, projection, and context attributes. Absent: matches unconditionally. An evaluation failure means not matching.",
+      "type": "string",
+      "maxLength": 4096
+    },
+    "effect": {
+      "description": "'approve' (default) or 'block_descendants'. Enum evolution: new effects only in a new major.",
+      "type": "string",
+      "enum": [
+        "approve",
+        "block_descendants"
+      ],
+      "default": "approve"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "row_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "scope_tenant_id",
+    "opportunity_pattern",
+    "resource_selector",
+    "effect",
+    "enabled",
+    "reason"
+  ]
+}

@@ -1,5 +1,5 @@
 ---
-description: "Technical design of the Policy Engine: built-in policy set, bundle store, management service, and the per-request decision path served as the default admission-control engine plugin."
+description: "Technical design of the Policy Engine: built-in policy set, bundle store, management service, applicability reports, and the per-request decision path served as the default Guardrail Stage of admission-control."
 ---
 
 <!-- cpt:
@@ -45,7 +45,9 @@ system: cf
 Policy Engine is a stateless evaluator over a small relational store. Policy content (bundles, versions, documents,
 assignments) is written through a management service and read back on every decision; nothing about a decision is
 stored. The gear has two surfaces that share only the content: the management API (a Rust client and REST) and the
-`admission-control` engine plugin, which is the only decision surface. It is the gate's default engine.
+`admission-control` Governance Stage plugin, which is the only decision surface. It is the gate's default Guardrail
+Stage: first in order, without side effects, and the same in enforce and Preview mode
+([Operation Governance DESIGN](../../../../docs/arch/operation-governance/DESIGN.md)).
 
 Built-in policies come from the configuration, are validated like a version's documents and compiled once at startup,
 and are never stored. A decision first evaluates the built-ins matching the request, for every tenant; the first denial
@@ -69,7 +71,8 @@ a failure, never a permit.
 | `cpt-cf-policy-engine-fr-tenant-assignment` | `cpt-cf-policy-engine-entity-assignment`; the store enforces one assignment per bundle and tenant; the decision path reads assignments with their active version ids along the chain and ignores any whose owner tenant is not in the chain at or above its target. |
 | `cpt-cf-policy-engine-fr-inheritance-barriers` | `cpt-cf-policy-engine-component-hierarchy-client` always asks for barriers to be respected; no setting changes it. The decision path applies an assignment only while its owner tenant is in the resource tenant's barrier-respecting chain at or above the assignment's target (see 3.6). |
 | `cpt-cf-policy-engine-fr-non-enforcing-assignment` | The assignment's enforce flag, the only mutable part of an assignment. |
-| `cpt-cf-policy-engine-fr-admission-engine` | `cpt-cf-policy-engine-component-engine-plugin` registers a GTS plugin instance; no other decision client exists. |
+| `cpt-cf-policy-engine-fr-admission-engine` | `cpt-cf-policy-engine-component-engine-plugin` registers a GTS stage plugin instance (and the V1 engine instance); no other decision client exists. |
+| `cpt-cf-policy-engine-fr-applicability` | `cpt-cf-policy-engine-component-applicability` derives applicability and Facts read from built-ins and active bindings; the management service publishes a change notice after each publish operation. |
 | `cpt-cf-policy-engine-fr-cross-tenant` | `cpt-cf-policy-engine-component-decision` checks that the caller's tenant is in the resource tenant's barrier-respecting chain, the same chain that selects policies, before reading any tenant policy. |
 | `cpt-cf-policy-engine-fr-applicable-set` | `cpt-cf-policy-engine-component-matcher` over the loaded documents. |
 | `cpt-cf-policy-engine-fr-active-content-loading` | `cpt-cf-policy-engine-component-repository` reads active bindings per request; `cpt-cf-policy-engine-component-compile-cache` keyed by version holds compiled content. |
@@ -234,7 +237,11 @@ is not evaluated.
 
 ```mermaid
 flowchart LR
-    GW[admission-control] --> PL[Engine Plugin]
+    GW[admission-control] --> PL[Stage Plugin]
+    GW --> AP[Applicability Reporter]
+    AP --> RP
+    AP --> BS
+    MG --> EB[event-broker]
     PL --> DS[Decision Service]
     DS --> BS[Built-in Policy Set]
     DS --> HC[Hierarchy Client]
@@ -254,12 +261,27 @@ flowchart LR
     INIT --> BS
 ```
 
-#### Engine Plugin
+#### Stage Plugin
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-component-engine-plugin`
 
-Implements the `admission-control` engine plugin contract and registers the gear's plugin instance, with the vendor
-and priority from configuration. It only forwards: the decision service already answers in the gate's vocabulary.
+Implements the `admission-control` `GovernanceStagePluginClientV1` contract and registers the gear's stage plugin instance
+(kind `guardrail`, no side effects, Preview supported), with the vendor and priority from configuration. Until
+`AdmissionClientV1` is retired it also implements the V1 engine plugin contract over the same decision service. It only
+forwards: the decision service already answers in the gate's vocabulary, and Preview mode takes the same path.
+
+#### Applicability Reporter
+
+- [ ] `p1` - **ID**: `cpt-cf-policy-engine-component-applicability`
+
+Answers the gate's `applicability` call. Built-in policies apply to every tenant; each active binding applies to its
+target tenant's barrier-respecting subtree. For each matching action and resource type pattern, it reports the Facts
+read: the `input.properties` keys referenced in the compiled documents, found by Rego reference analysis when the
+version is compiled (`referenced_input_paths` of `toolkit-policy-evaluation`, with its flag saying whether they are
+exact). A built-in policy with an inexact reference counts as reading every declared Fact; a tenant document with one
+is refused at validation. The applicability
+version is the highest activation or assignment change sequence. After a committed publish operation, the management
+service publishes a change notice to `event-broker`, best effort; the gate's maximum snapshot age covers a lost notice.
 
 #### Decision Service
 
@@ -280,7 +302,7 @@ under the request's evaluation budget; tenant policy gets what the built-ins lef
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-component-matcher`
 
 Decides whether a document applies: one of its resource type patterns matches the request's type, and its actions are
-empty or contain the request's action.
+empty or contain the request's action, which is the Governed Operation family (type ID without the version).
 
 #### Evaluator
 
@@ -293,7 +315,7 @@ for hierarchy or store calls. Any error fails the whole request; running out of 
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-component-combiner`
 
-Provided by the `admission-control` SDK rather than this gear, so every engine builds results the same way: denials of
+Provided by the `admission-control` SDK rather than this gear, so every stage builds results the same way: denials of
 enforcing assignments deny, denials of non-enforcing ones are shadow denials, and the result stays within the gate's
 bound on references, shadow denials dropped first. The decision service logs any drop.
 
@@ -311,8 +333,9 @@ charged to the evaluation budget, since it happens once per version per process.
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-component-validator`
 
 Shared by validate, activate and the startup check of built-in policies: content limits, unique names, compilation with
-the library's guards and denylist screen, pattern syntax and known concrete types. Every finding names its document;
-no check stops the others.
+the library's guards and denylist screen, pattern syntax and known concrete types, and for tenant documents, Facts read:
+every `input.properties` reference must be exact and name a Fact declared by each Governed Operation type the version
+can match. Every finding names its document; no check stops the others.
 
 #### Type Reference Resolver
 
@@ -389,7 +412,7 @@ The management client (`cpt-cf-policy-engine-interface-management-client`) and t
 | Assignment | assign, update the enforce flag, unassign, and their dry runs | `publish` | unstable |
 | Assignment | get, list | `read`; `publish` for dormant assignments at the caller's tenants | unstable |
 
-Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), bundles filterable by `name` (`eq`, `ne`, `in`, `contains`, `startswith`, `endswith`) and `owner_tenant_id` (`eq`, `ne`, `in`), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, within the backend's bind budget (`max_bind_params_for`, less a reserve for the filter and cursor). It binds up to five values per tenant of the caller's subtree, depending on its grants; a caller beyond the budget (in the worst case roughly 5,800 tenants on SQLite and 11,800 on PostgreSQL) is refused with `SUBTREE_TOO_LARGE`, never answered partially. Reading one assignment decides the same rule by point checks on its owner and target and reads no subtree, so it is not limited. The management surface's hierarchy calls are bounded by `management_hierarchy_timeout` (default 1 s), apart from the decision path's `hierarchy_timeout`, so a slow subtree read never loosens the decision path. A local tenant-closure projection, or a paged descendants read from the tenant resolver, would lift the limit; neither exists yet. No decision operation exists outside the engine plugin.
+Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), bundles filterable by `name` (`eq`, `ne`, `in`, `contains`, `startswith`, `endswith`) and `owner_tenant_id` (`eq`, `ne`, `in`), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, within the backend's bind budget (`max_bind_params_for`, less a reserve for the filter and cursor). It binds up to five values per tenant of the caller's subtree, depending on its grants; a caller beyond the budget (in the worst case roughly 5,800 tenants on SQLite and 11,800 on PostgreSQL) is refused with `SUBTREE_TOO_LARGE`, never answered partially. Reading one assignment decides the same rule by point checks on its owner and target and reads no subtree, so it is not limited. The management surface's hierarchy calls are bounded by `management_hierarchy_timeout` (default 1 s), apart from the decision path's `hierarchy_timeout`, so a slow subtree read never loosens the decision path. A local tenant-closure projection, or a paged descendants read from the tenant resolver, would lift the limit; neither exists yet. No decision operation exists outside the stage plugin.
 
 A dry run (`check_publish`; `dry_run=true` on the operation's route) answers `204` when the operation would succeed
 and the operation's own problem otherwise. Validation answers the same way: `204` for valid content, otherwise the
@@ -402,13 +425,13 @@ SDK module holds the fixed content bounds.
 
 The three resource types (id-only type schemas) and the three permission instances are declared in the SDK's
 [GTS catalog](../policy-engine-sdk/src/gts.rs) and reach `types-registry` through the `toolkit-gts` inventory. The
-engine plugin instance carries the configured vendor and priority, so the gear builds it and registers it at init.
+stage plugin instance (and the V1 engine plugin instance) carries the configured vendor and priority, so the gear builds it and registers it at init.
 
 ### 3.4 Internal Dependencies
 
 | Dependency | Use |
 |------------|-----|
-| `admission-control-sdk` | Engine plugin contract and result building |
+| `admission-control-sdk` | Governance Stage and V1 engine plugin contracts, and result building |
 | `toolkit-policy-evaluation` | Rego compilation with guards and denylist screen; evaluation budget |
 | `policy-engine-sdk` | Management client, models, typed management errors, GTS types and ids |
 
@@ -417,9 +440,10 @@ engine plugin instance carries the configured vendor and priority, so the gear b
 | Dependency | Use |
 |------------|-----|
 | `tenant-resolver` | Ancestor chain (decisions, barriers respected), reachability and subtree (management) |
-| `types-registry` | Concrete type id existence at startup, validate and activate; registration of the engine plugin instance |
+| `types-registry` | Concrete type id existence at startup, validate and activate; registration of the stage and V1 engine plugin instances |
 | `authz-resolver` | Management permission decisions |
 | `toolkit-db` | Postgres or SQLite |
+| `event-broker` | Applicability change notices (best effort) |
 
 ### 3.6 Interactions & Sequences
 
@@ -549,8 +573,10 @@ decision path reads assignments by tenant, the listing by bundle or tenant (both
 
 - [ ] `p2` - **ID**: `cpt-cf-policy-engine-topology-in-process`
 
-In-process with `admission-control`, sharing one runtime and calling through ClientHub. It is the gate's default
-engine: the example server builds it with the gate, and the quickstart configuration selects it.
+In the same unit as `admission-control`, sharing one runtime and calling through ClientHub: in-process in the Embedded
+profile, inside the gate's out-of-process unit in the Self-Hosted and Kubernetes Native profiles, so Consuming Gears
+never link this gear or reach its store. It is the gate's default Guardrail Stage: the example server builds it with
+the gate, and the quickstart configuration selects it.
 
 ### 3.9 Expected Sizes
 
@@ -587,6 +613,10 @@ administration audit trail (`cpt-cf-policy-engine-fr-administration-audit`) depe
 Metrics cover evaluations by outcome, evaluation latency and compile-cache hits. `compile_cache_capacity` (default 256) sizes the compile cache. The gear is ready once initialised and
 runs no background tasks. Denial, failure and invalid request stay distinct at the plugin boundary; refusal events are
 published by `admission-control`, not here.
+
+The gear is selected as the Guardrail Stage of the governance gate, as decided in
+[Operation Governance ADR 0001](../../../../docs/arch/operation-governance/ADR/0001-cpt-cf-operation-governance-adr-governance-gate.md);
+applicability reports follow [ADR 0002](../../../../docs/arch/operation-governance/ADR/0002-cpt-cf-operation-governance-adr-fact-collection.md).
 
 ## 5. Traceability
 

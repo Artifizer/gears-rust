@@ -5,6 +5,24 @@ date: 2026-04-10
 
 # Use Rust Trait as Contract Source of Truth, with Macro Generation and Manual Implementation Both Supported
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Contract Trait + Macro Generation + Manual Implementation Allowed](#option-a-contract-trait--macro-generation--manual-implementation-allowed)
+  - [Option B: Contract Trait + Manual Implementations Only](#option-b-contract-trait--manual-implementations-only)
+  - [Option C: OpenAPI-First — OpenAPI YAML as Source, Generate Rust Types](#option-c-openapi-first--openapi-yaml-as-source-generate-rust-types)
+  - [Option D: IDL-First — Protobuf, Smithy, or TypeSpec as Source](#option-d-idl-first--protobuf-smithy-or-typespec-as-source)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-binding-adr-contract-source-of-truth`
 
 ## Context and Problem Statement

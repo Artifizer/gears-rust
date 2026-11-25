@@ -1,0 +1,214 @@
+{
+  "$id": "gts://gts.cf.core.approval.request.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Approval Request entity, as read by requesters, opening gears, approvers, and administrators (PRD cpt-cf-approval-service-fr-create-request, cpt-cf-approval-service-upreq-request-read). A request is opened only by a verification call with the register option when approval is required and unsatisfied; at most one open request exists per (opportunity, projection, subject). Records are anonymous instances: 'id' is a UUID and the GTS type of the opportunity is carried in 'opportunity_type'. This type is the PDP resource type for the request read, withdraw, and escalate permissions (DESIGN cpt-cf-approval-service-entity-request).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "Request identifier (UUIDv7). Also the subject ID of every request event.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "opportunity_type": {
+      "description": "GTS type of the opportunity, derived from gts.cf.core.approval.opportunity.v1~.",
+      "type": "string",
+      "x-gts-type-ref": "gts.cf.core.approval.opportunity.v1~"
+    },
+    "projection": {
+      "$ref": "#/definitions/ProjectionRef"
+    },
+    "subject": {
+      "$ref": "#/definitions/SubjectRef"
+    },
+    "requester_id": {
+      "description": "Authenticated identity on whose behalf the opening verification call was made.",
+      "type": "string",
+      "maxLength": 256
+    },
+    "requester_tenant_id": {
+      "description": "Tenant of the requester; request events are also published here when it differs from the subject tenant.",
+      "type": "string",
+      "format": "uuid"
+    },
+    "opened_by": {
+      "description": "Service identity of the gear that made the opening verification call.",
+      "type": "string",
+      "maxLength": 256
+    },
+    "context": {
+      "description": "Context attributes stored with the request, validated against the opportunity's declaration. Returned only to the requester, holders of the approve permission, and administrators of the scope; omitted for other readers, including the opening gear (PRD cpt-cf-approval-service-nfr-data-classification).",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "context_fingerprint": {
+      "description": "SHA-256 digest (hex) of the canonical JSON (RFC 8785) of the context attributes. Approve decisions recorded against the request are bound to it.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "justification": {
+      "description": "Optional justification from the caller. Same visibility as 'context'.",
+      "type": "string",
+      "maxLength": 2048
+    },
+    "correlation_id": {
+      "description": "Caller correlation ID echoed in verdicts and request events (PRD cpt-cf-approval-service-fr-correlation).",
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^[\\x20-\\x7E]*$"
+    },
+    "status": {
+      "description": "'open' or 'closed'. Enum evolution: new values only in a new major; readers treat unknown values as closed.",
+      "type": "string",
+      "enum": [
+        "open",
+        "closed"
+      ]
+    },
+    "outcome": {
+      "description": "Verdict outcome that settled the request. Present only when close_reason is 'verdict_settled'.",
+      "type": "string",
+      "enum": [
+        "approved",
+        "denied",
+        "not_required",
+        "invalid"
+      ]
+    },
+    "close_reason": {
+      "description": "Why the request closed. Enum evolution: new values only in a new major; readers treat unknown values as closed without approval.",
+      "type": "string",
+      "enum": [
+        "verdict_settled",
+        "context_changed",
+        "withdrawn",
+        "projection_deregistered"
+      ]
+    },
+    "unmet_requirements": {
+      "description": "For an open request: the requirements of the applicable policies that are not yet satisfied (current stage only for staged policies, p2).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "policy_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "stage": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "missing_approvals": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "missing_mandatory_approvers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 256
+            }
+          }
+        },
+        "required": [
+          "policy_id",
+          "missing_approvals",
+          "missing_mandatory_approvers"
+        ]
+      }
+    },
+    "escalation_level": {
+      "description": "Number of escalations of an open request (p2, PRD cpt-cf-approval-service-fr-request-escalation). Zero when never escalated.",
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "verdict_version": {
+      "description": "Monotonic version of the change that last affected this request.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "closed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "id",
+    "opportunity_type",
+    "projection",
+    "subject",
+    "requester_id",
+    "requester_tenant_id",
+    "opened_by",
+    "context_fingerprint",
+    "status",
+    "verdict_version",
+    "created_at"
+  ],
+  "definitions": {
+    "ProjectionRef": {
+      "description": "Projection identity and display name.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projection_type": {
+          "type": "string",
+          "x-gts-type-ref": "gts.cf.core.approval.projection.v1~"
+        },
+        "resource_tenant_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "resource_id": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "projection_type",
+        "resource_tenant_id",
+        "resource_id",
+        "version"
+      ]
+    },
+    "SubjectRef": {
+      "description": "Subject identifiers only (PRD cpt-cf-approval-service-fr-subject).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "subject_type": {
+          "type": "string",
+          "x-gts-type-ref": "gts.*"
+        },
+        "subject_tenant_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "subject_id": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "subject_type",
+        "subject_tenant_id",
+        "subject_id"
+      ]
+    }
+  }
+}

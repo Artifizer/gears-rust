@@ -1,0 +1,6 @@
+{
+  "id": "gts.cf.toolkit.authz.permission.v1~cf.approval_service._.audit_read.v1",
+  "resource_type": "gts.cf.core.approval.opportunity.v1~",
+  "action": "read_audit",
+  "display_name": "Read the approval audit trail; context attributes and justifications are returned only to readers who also hold approve or administer in scope"
+}

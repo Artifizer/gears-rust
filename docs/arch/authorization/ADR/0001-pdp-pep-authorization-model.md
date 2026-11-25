@@ -6,6 +6,28 @@ decision-makers: Constructor Fabric steering committee
 
 # Adopt AuthZEN-based PDP/PEP Authorization Model
 
+**ID**: `cpt-cf-authorization-adr-pdp-pep-authorization-model`
+
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+  - [PDP/PEP Architecture Model](#pdppep-architecture-model)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Gear-level Authorization (PEP = PDP)](#option-a-gear-level-authorization-pep--pdp)
+  - [Option B: Google Zanzibar / ReBAC](#option-b-google-zanzibar--rebac)
+  - [Option C: OpenID AuthZEN 1.0 (as-is)](#option-c-openid-authzen-10-as-is)
+  - [Option D: OPA Partial Evaluation](#option-d-opa-partial-evaluation)
+  - [Option E: OpenID AuthZEN 1.0 + Constraint Extensions](#option-e-openid-authzen-10--constraint-extensions)
+- [More Information](#more-information)
+
+<!-- /toc -->
+
 ## Context and Problem Statement
 
 Gears is a modular platform for building multi-tenant vendor platforms. Each vendor has its own identity provider (IdP), authorization model, tenant service, and policy manager. Gears must integrate with these vendor-specific systems without assuming a particular policy model (RBAC/ABAC/ReBAC).
@@ -87,6 +109,10 @@ Implementation:
 **Risks:**
 
 - AuthZEN may add constraint-like features in future versions (alignment opportunity or divergence risk)
+
+### Confirmation
+
+Verify that resource queries apply the PDP constraints at the enforcement point and that an authorization decision without usable constraints cannot broaden access.
 
 ## Pros and Cons of the Options
 
