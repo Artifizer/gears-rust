@@ -1,7 +1,7 @@
 [package]
 name = "cf-gears-oagw"
 description = "OAGW module - discovers and routes to plugins"
-version = "0.9.0"
+version = "0.10.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -50,12 +50,14 @@ cluster = ["dep:cluster-sdk"]
 grpc-client = ["cluster", "cluster-sdk/grpc-client"]
 
 [dependencies]
-oagw-sdk = { path = "../oagw-sdk", package="cf-gears-oagw-sdk", version = "0.6.0", features = ["axum"] }
+oagw-sdk = { path = "../oagw-sdk", package="cf-gears-oagw-sdk", version = "0.7.0", features = ["axum"] }
 toolkit = { workspace = true }
 toolkit-auth = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum"] }
 toolkit-gts = { workspace = true }
 toolkit-http = { workspace = true }
+# Upstream circuit breakers, with their OpenTelemetry observer.
+toolkit-resilience = { workspace = true, features = ["otel"] }
 toolkit-security = { workspace = true }
 toolkit-macros = { workspace = true }
 toolkit-utils = { workspace = true, features = ["humantime-serde"] }
@@ -108,6 +110,7 @@ tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+h2 = { workspace = true }
 # Upstream proxy engine (ADR-0019)
 toolkit-http-proxy = { workspace = true }
 http-body-util = { workspace = true }
@@ -132,6 +135,9 @@ http-body-util = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 httpmock = { workspace = true }
+# Verify the private_key_jwt client assertions the OAuth2 plugin signs.
+jsonwebtoken = { workspace = true }
+toolkit-security = { workspace = true, features = ["jwt"] }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 futures-util = { workspace = true }
@@ -139,6 +145,8 @@ toolkit-db = { workspace = true, features = ["sqlite", "pg", "test-support"] }
 testcontainers = { workspace = true }
 test-containers = { workspace = true }
 tracing-test = { workspace = true }
+# Capture every crate's events in the private_key_jwt leak tests.
+tracing-subscriber = { workspace = true }
 # Seeded random writes for the proxy cache's model test (ADR-0020).
 rand = { workspace = true }
 # Properties of the proxy cache's change-log decoder (ADR-0020).

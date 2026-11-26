@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::TokenCacheConfig;
+use crate::domain::circuit_breaker::CircuitBreakers;
 use crate::domain::services::{
     ControlPlaneService, ControlPlaneServiceImpl, DataPlaneService, EndpointSelector,
     ServiceGatewayClientV1Facade,
@@ -224,11 +225,38 @@ impl crate::domain::ports::OagwMetricsPort for ProvisioningMetrics {
     fn record_request_duration_seconds(&self, _: &str, _: &str, _: &str, _: f64) {}
     fn increment_in_flight(&self, _: &str) {}
     fn decrement_in_flight(&self, _: &str) {}
-    fn record_rate_limit_exceeded(&self, _: &str, _: &str) {}
-    fn record_rate_limit_usage_ratio(&self, _: &str, _: &str, _: f64) {}
+    fn record_rate_limit_exceeded(
+        &self,
+        _: &str,
+        _: &str,
+        _: crate::domain::ports::metric_labels::RateLimitBucket,
+    ) {
+    }
+    fn record_rate_limit_usage_ratio(
+        &self,
+        _: &str,
+        _: &str,
+        _: crate::domain::ports::metric_labels::RateLimitBucket,
+        _: f64,
+    ) {
+    }
     fn increment_active_websocket_sessions(&self, _: &str) {}
     fn decrement_active_websocket_sessions(&self, _: &str) {}
-    fn record_websocket_session_duration_seconds(&self, _: &str, _: f64) {}
+    fn record_websocket_session_duration_seconds(
+        &self,
+        _: &str,
+        _: crate::domain::ports::metric_labels::StreamOutcome,
+        _: f64,
+    ) {
+    }
+    fn record_stream_duration_seconds(
+        &self,
+        _: &str,
+        _: &str,
+        _: crate::domain::ports::metric_labels::StreamOutcome,
+        _: f64,
+    ) {
+    }
     fn record_rate_limit_sweep(&self, _: u64, _: u64) {}
     fn record_registry_provisioning_failure(&self, kind: &str, reason: &str) {
         self.failures
@@ -760,6 +788,7 @@ pub struct TestCpBuilder {
     credentials: Vec<(String, String)>,
     credstore: Option<Arc<dyn CredStoreClientV1>>,
     tenant_resolver: Option<MockTenantResolverClient>,
+    circuit_breakers: Option<Arc<CircuitBreakers>>,
 }
 
 impl TestCpBuilder {
@@ -769,7 +798,16 @@ impl TestCpBuilder {
             credentials: Vec::new(),
             credstore: None,
             tenant_resolver: None,
+            circuit_breakers: None,
         }
+    }
+
+    /// Drop the breakers of `circuit_breakers` on writes, as the gear does
+    /// with the Data Plane's.
+    #[must_use]
+    pub(crate) fn with_circuit_breakers(mut self, circuit_breakers: Arc<CircuitBreakers>) -> Self {
+        self.circuit_breakers = Some(circuit_breakers);
+        self
     }
 
     /// Use `credstore` instead of a mock built from
@@ -813,22 +851,22 @@ impl TestCpBuilder {
             .unwrap_or_else(|| Arc::new(MockCredStoreClient::with_secrets(self.credentials)));
         hub.register::<dyn CredStoreClientV1>(credstore.clone());
 
-        let cp: Arc<dyn ControlPlaneService> = Arc::new(
-            ControlPlaneServiceImpl::new(
-                upstream_repo,
-                route_repo,
-                tenant_resolver,
-                allow_all_enforcer(),
-                credstore,
-                Arc::new(SsrfGuard::disabled()),
-                None,
-            )
-            .with_rate_limiter(rate_limiter)
-            // The harness proxies to plaintext mocks, as its Data Plane allows.
-            .with_allow_http_upstream(true),
-        );
-
-        cp
+        let mut cp = ControlPlaneServiceImpl::new(
+            upstream_repo,
+            route_repo,
+            tenant_resolver,
+            allow_all_enforcer(),
+            credstore,
+            Arc::new(SsrfGuard::disabled()),
+            None,
+        )
+        .with_rate_limiter(rate_limiter)
+        // The harness proxies to plaintext mocks, as its Data Plane allows.
+        .with_allow_http_upstream(true);
+        if let Some(circuit_breakers) = self.circuit_breakers {
+            cp = cp.with_circuit_breakers(circuit_breakers);
+        }
+        Arc::new(cp)
     }
 }
 
@@ -854,6 +892,10 @@ pub struct TestDpBuilder {
     websocket_close_timeout: Option<Duration>,
     metrics: Option<Arc<dyn crate::domain::ports::OagwMetricsPort>>,
     transform_plugins: Vec<(String, Arc<dyn crate::domain::plugin::TransformPlugin>)>,
+    auth_plugins: Vec<(String, Arc<dyn crate::domain::plugin::AuthPlugin>)>,
+    streaming_idle_timeout: Option<Duration>,
+    circuit_breakers: Option<Arc<CircuitBreakers>>,
+    upstream_ssrf_policy: bool,
 }
 
 impl TestDpBuilder {
@@ -871,6 +913,10 @@ impl TestDpBuilder {
             websocket_close_timeout: None,
             metrics: None,
             transform_plugins: Vec::new(),
+            auth_plugins: Vec::new(),
+            streaming_idle_timeout: None,
+            circuit_breakers: None,
+            upstream_ssrf_policy: false,
         }
     }
 
@@ -889,6 +935,18 @@ impl TestDpBuilder {
         plugin: Arc<dyn crate::domain::plugin::TransformPlugin>,
     ) -> Self {
         self.transform_plugins.push((plugin_id.to_owned(), plugin));
+        self
+    }
+
+    /// Register an auth plugin under `plugin_id`, replacing a built-in of
+    /// that id.
+    #[must_use]
+    pub(crate) fn with_auth_plugin(
+        mut self,
+        plugin_id: &str,
+        plugin: Arc<dyn crate::domain::plugin::AuthPlugin>,
+    ) -> Self {
+        self.auth_plugins.push((plugin_id.to_owned(), plugin));
         self
     }
 
@@ -960,6 +1018,28 @@ impl TestDpBuilder {
         self
     }
 
+    /// Override the SSE streaming idle timeout.
+    #[must_use]
+    pub fn with_streaming_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.streaming_idle_timeout = Some(timeout);
+        self
+    }
+
+    /// Resolve upstream hosts in the engine under the default SSRF policy.
+    #[must_use]
+    pub fn with_upstream_ssrf_policy(mut self) -> Self {
+        self.upstream_ssrf_policy = true;
+        self
+    }
+
+    /// Use `circuit_breakers`, shared with the Control Plane, as the gear
+    /// does.
+    #[must_use]
+    pub(crate) fn with_circuit_breakers(mut self, circuit_breakers: Arc<CircuitBreakers>) -> Self {
+        self.circuit_breakers = Some(circuit_breakers);
+        self
+    }
+
     /// Fetch `CredStoreClientV1` from the hub, create a DP service with
     /// the given CP, and return the trait object.
     pub(crate) fn build_and_register(
@@ -999,7 +1079,11 @@ impl TestDpBuilder {
                     #[cfg(feature = "test-utils")]
                     skip_upstream_tls_verify: self.skip_upstream_tls_verify,
                 },
-                Arc::new(SsrfGuard::disabled()),
+                Arc::new(if self.upstream_ssrf_policy {
+                    SsrfGuard::from_config(&Default::default()).expect("default SSRF policy")
+                } else {
+                    SsrfGuard::disabled()
+                }),
             )
             .expect("test proxy engine"),
         );
@@ -1022,8 +1106,10 @@ impl TestDpBuilder {
             backend_selector,
             engine,
             self.metrics
-                .unwrap_or_else(|| std::sync::Arc::new(crate::domain::ports::NoopMetrics)),
+                .unwrap_or_else(|| Arc::new(crate::domain::ports::NoopMetrics)),
             rate_limiter,
+            self.circuit_breakers
+                .unwrap_or_else(|| Arc::new(CircuitBreakers::new())),
         )
         .with_allow_http_upstream(true);
         if let Some(timeout) = self.request_timeout {
@@ -1041,7 +1127,12 @@ impl TestDpBuilder {
         for (plugin_id, plugin) in self.transform_plugins {
             svc = svc.with_transform_plugin(&plugin_id, plugin);
         }
-
+        for (plugin_id, plugin) in self.auth_plugins {
+            svc = svc.with_auth_plugin(&plugin_id, plugin);
+        }
+        if let Some(timeout) = self.streaming_idle_timeout {
+            svc = svc.with_streaming_idle_timeout(timeout);
+        }
         let streams = svc.stream_shutdown();
         (Arc::new(svc), streams)
     }
@@ -1080,12 +1171,16 @@ pub fn build_test_app_state(
     // The gear hands one `max_body_size_bytes` to both the handler and the
     // Data Plane, so a limit set for the Data Plane applies to the handler too.
     let max_body_size_bytes = dp_builder.max_body_size.unwrap_or(100 * 1024 * 1024);
-    // One limiter, as the gear wires it: Control Plane writes drop the
-    // buckets the Data Plane enforces.
+    // One limiter and one breaker registry, as the gear wires them: Control
+    // Plane writes drop what the Data Plane enforces.
     let rate_limiter = Arc::new(crate::domain::rate_limit::RateLimiter::new());
-    let cp = cp_builder.build_and_register(hub, rate_limiter.clone());
+    let circuit_breakers = Arc::new(CircuitBreakers::new());
+    let cp = cp_builder
+        .with_circuit_breakers(circuit_breakers.clone())
+        .build_and_register(hub, rate_limiter.clone());
     let (dp, stream_shutdown) = dp_builder
         .with_backend_selector(backend_selector.clone())
+        .with_circuit_breakers(circuit_breakers)
         .build_and_register_with_streams(hub, cp.clone(), rate_limiter);
     let facade: Arc<dyn ServiceGatewayClientV1> = Arc::new(ServiceGatewayClientV1Facade::new(
         cp.clone(),
@@ -1126,12 +1221,16 @@ pub fn build_test_gateway(
                 )),
             )
         });
-    // One limiter, as the gear wires it: Control Plane writes drop the
-    // buckets the Data Plane enforces.
+    // One limiter and one breaker registry, as the gear wires them: Control
+    // Plane writes drop what the Data Plane enforces.
     let rate_limiter = Arc::new(crate::domain::rate_limit::RateLimiter::new());
-    let cp = cp_builder.build_and_register(hub, rate_limiter.clone());
+    let circuit_breakers = Arc::new(CircuitBreakers::new());
+    let cp = cp_builder
+        .with_circuit_breakers(circuit_breakers.clone())
+        .build_and_register(hub, rate_limiter.clone());
     let dp = dp_builder
         .with_backend_selector(backend_selector.clone())
+        .with_circuit_breakers(circuit_breakers)
         .build_and_register(hub, cp.clone(), rate_limiter);
     let oagw: Arc<dyn ServiceGatewayClientV1> =
         Arc::new(ServiceGatewayClientV1Facade::new(cp, dp, backend_selector));

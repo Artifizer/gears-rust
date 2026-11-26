@@ -236,6 +236,7 @@ fn upstream(tenant_id: Uuid, alias: &str) -> Upstream {
         headers: None,
         plugins: None,
         rate_limit: None,
+        circuit_breaker: None,
         cors: None,
         tags: vec![],
         managed_by: ManagedBy::Api,
@@ -334,6 +335,14 @@ fn full_upstream(tenant_id: Uuid, alias: &str) -> Upstream {
             ],
         }),
         rate_limit: Some(rate_limit()),
+        circuit_breaker: Some(crate::domain::model::CircuitBreakerConfig {
+            sharing: SharingMode::Inherit,
+            enabled: true,
+            failure_threshold: 5,
+            timeout_seconds: 30,
+            success_threshold: 3,
+            owner_id: None,
+        }),
         cors: Some(cors(SharingMode::Inherit)),
         tags: strings(&["ai", "llm"]),
         ..upstream(tenant_id, alias)
@@ -568,6 +577,11 @@ async fn case_upstream_round_trip_all_fields(f: &Fixture) {
         burst: None,
         ..rate_limit()
     });
+    if let Some(cb) = updated.circuit_breaker.as_mut() {
+        cb.sharing = SharingMode::Enforce;
+        cb.enabled = false;
+        cb.failure_threshold = 1;
+    }
     updated.cors = None;
     updated.tags = strings(&["llm"]);
 
@@ -1484,13 +1498,16 @@ async fn case_tags_and_methods_keep_canonical_order(f: &Fixture) {
     let mut canonical = tags.clone();
     canonical.sort();
     assert_eq!(canonical, tags, "fixture tags must be canonical");
-    // Declaration order; alphabetical would be DELETE, GET, PATCH, POST, PUT.
+    // Declaration order; alphabetical would be DELETE, GET, HEAD, OPTIONS,
+    // PATCH, POST, PUT.
     let methods = vec![
         HttpMethod::Get,
         HttpMethod::Post,
         HttpMethod::Put,
         HttpMethod::Delete,
         HttpMethod::Patch,
+        HttpMethod::Head,
+        HttpMethod::Options,
     ];
 
     let up = add_upstream(
@@ -1522,10 +1539,13 @@ async fn case_tags_and_methods_keep_canonical_order(f: &Fixture) {
         list_routes(f, tenant, None, &ListQuery::default()).await,
         vec![route.clone()]
     );
-    assert_eq!(
-        find(f, &[tenant], &[up.id], "PATCH", "/v1").await.unwrap(),
-        route
-    );
+    for method in ["PATCH", "HEAD", "OPTIONS"] {
+        assert_eq!(
+            find(f, &[tenant], &[up.id], method, "/v1").await.unwrap(),
+            route,
+            "{method}"
+        );
+    }
 
     // Updates rewrite the child rows; the order survives that too.
     let up = Upstream {

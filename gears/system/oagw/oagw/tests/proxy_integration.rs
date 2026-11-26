@@ -9,8 +9,8 @@ use toolkit_gts::{GTS_ID_URI_PREFIX, gts_id};
 
 use http::{Method, StatusCode};
 use oagw::test_support::{
-    APIKEY_AUTH_PLUGIN_ID, AppHarness, MockBody, MockGuard, MockResponse, MockUpstream,
-    OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID,
+    APIKEY_AUTH_PLUGIN_ID, AppHarness, MockBody, MockGuard, MockResponse, MockStreamEnd,
+    MockUpstream, OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID,
 };
 use oagw_sdk::api::ErrorSource;
 use oagw_sdk::{Body, HTTP_PROTOCOL_ID};
@@ -671,6 +671,479 @@ async fn proxy_sse_stream_ends_when_streams_were_stopped() {
     assert!(body.next().await.is_none(), "the stream goes on");
 }
 
+/// An upstream on the shared mock with one route, `method path` with no
+/// path suffix.
+async fn setup_mock_route(h: &AppHarness, alias: &str, method: HttpMethod, path: String) {
+    let ctx = h.security_context().clone();
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                HTTP_PROTOCOL_ID,
+            )
+            .alias(alias)
+            .build(),
+        )
+        .await
+        .unwrap();
+    h.facade()
+        .create_route(
+            ctx,
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![method],
+                        path,
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+}
+
+fn sse_stream_mock(chunks: &[&str], end: MockStreamEnd) -> MockResponse {
+    MockResponse {
+        status: 200,
+        headers: vec![("content-type".into(), "text/event-stream".into())],
+        body: MockBody::Stream {
+            chunks: chunks.iter().map(|c| (*c).to_owned()).collect(),
+            end,
+        },
+    }
+}
+
+/// Sends `POST path` over HTTP/1.1 to a server started with
+/// `start_oagw_server`.
+async fn http1_post(
+    addr: std::net::SocketAddr,
+    path: &str,
+) -> http::Response<hyper::body::Incoming> {
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp))
+            .await
+            .unwrap();
+    tokio::spawn(conn);
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(http::header::HOST, addr.to_string())
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(http_body_util::Full::new(bytes::Bytes::from_static(
+            br#"{"stream":true}"#,
+        )))
+        .unwrap();
+    sender.send_request(req).await.unwrap()
+}
+
+/// Reads `body` until it ends: the data received, and how it ended.
+async fn read_http_body(body: &mut hyper::body::Incoming) -> (Vec<u8>, Result<(), hyper::Error>) {
+    use http_body_util::BodyExt as _;
+    let mut data = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), body.frame())
+            .await
+            .expect("the body neither ends nor fails");
+        match frame {
+            None => return (data, Ok(())),
+            Some(Err(e)) => return (data, Err(e)),
+            Some(Ok(frame)) => {
+                if let Ok(chunk) = frame.into_data() {
+                    data.extend_from_slice(&chunk);
+                }
+            }
+        }
+    }
+}
+
+// 13.3: a stop does not cut a non-SSE body: every upstream response is
+// streamed, and the HTTP drain lets it finish.
+#[tokio::test]
+async fn proxy_non_sse_body_is_not_cut_when_streams_are_stopped() {
+    use futures_util::StreamExt as _;
+
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "GET",
+        "/download",
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/octet-stream".into())],
+            body: MockBody::Stream {
+                chunks: vec!["part-1".into()],
+                end: MockStreamEnd::Hold,
+            },
+        },
+    );
+    let h = AppHarness::builder().build().await;
+    setup_mock_route(
+        &h,
+        "download-stop",
+        HttpMethod::Get,
+        guard.path("/download"),
+    )
+    .await;
+
+    let req = http::Request::builder()
+        .method(Method::GET)
+        .uri(format!("/download-stop{}", guard.path("/download")))
+        .body(Body::Empty)
+        .unwrap();
+    let response = h
+        .facade()
+        .proxy_request(h.security_context().clone(), req)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "part-1");
+
+    h.end_streams();
+    let next = tokio::time::timeout(std::time::Duration::from_millis(500), body.next()).await;
+    assert!(next.is_err(), "the stop ended the body: {next:?}");
+}
+
+// 13.4: an SSE stream the upstream leaves silent past the streaming idle
+// timeout ends with `StreamingError::IdleTimeout` for SDK readers, not as a
+// complete stream.
+#[tokio::test]
+async fn proxy_sse_idle_timeout_ends_the_stream_with_an_error() {
+    use futures_util::StreamExt as _;
+    use oagw_sdk::{ServerEvent, ServerEventsResponse, ServerEventsStream, StreamingError};
+
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/sse/hold",
+        sse_stream_mock(&["data: held\n\n"], MockStreamEnd::Hold),
+    );
+    let h = AppHarness::builder()
+        .with_streaming_idle_timeout(std::time::Duration::from_millis(300))
+        .build()
+        .await;
+    setup_mock_route(
+        &h,
+        "sse-idle-sdk",
+        HttpMethod::Post,
+        guard.path("/sse/hold"),
+    )
+    .await;
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("/sse-idle-sdk{}", guard.path("/sse/hold")))
+        .body(Body::from(r#"{"stream":true}"#))
+        .unwrap();
+    let response = h
+        .facade()
+        .proxy_request(h.security_context().clone(), req)
+        .await
+        .unwrap();
+    let ServerEventsResponse::Events(mut events) =
+        ServerEventsStream::from_response::<ServerEvent>(response)
+    else {
+        panic!("not an SSE response");
+    };
+    assert_eq!(events.next().await.unwrap().unwrap().data, "held");
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
+        .await
+        .expect("the idle timeout ends the stream");
+    assert!(
+        matches!(next, Some(Err(StreamingError::IdleTimeout))),
+        "expected IdleTimeout, got {next:?}"
+    );
+    assert!(events.next().await.is_none());
+}
+
+// 13.4 over HTTP: the idle cut aborts the chunked body (no terminating
+// chunk) after the events already sent; nothing is written after them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_sse_idle_timeout_aborts_the_http_body() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/sse/hold",
+        sse_stream_mock(&["data: held\n\n"], MockStreamEnd::Hold),
+    );
+    let h = AppHarness::builder()
+        .with_streaming_idle_timeout(std::time::Duration::from_secs(1))
+        .build()
+        .await;
+    setup_mock_route(
+        &h,
+        "sse-idle-http",
+        HttpMethod::Post,
+        guard.path("/sse/hold"),
+    )
+    .await;
+    let (addr, server_handle) = start_oagw_server(&h).await;
+
+    // Before the request: the idle timer starts before the head is sent.
+    let started = std::time::Instant::now();
+    let response = http1_post(
+        addr,
+        &format!("/oagw/v1/proxy/sse-idle-http{}", guard.path("/sse/hold")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body();
+    let (data, end) = read_http_body(&mut body).await;
+    assert_eq!(data, b"data: held\n\n");
+    assert!(end.is_err(), "the idle cut passed for a complete stream");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(1),
+        "cut before the idle timeout: {:?}",
+        started.elapsed()
+    );
+
+    server_handle.abort();
+}
+
+// 13.5: the upstream fails mid-stream. The caller gets the events sent before
+// the failure and then a broken body: no JSON error is injected after the
+// head, and the stream does not end cleanly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_sse_upstream_failure_mid_stream_aborts_the_http_body() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/sse/fail",
+        sse_stream_mock(&["data: one\n\n", "data: two\n\n"], MockStreamEnd::Abort),
+    );
+    let h = AppHarness::builder().build().await;
+    setup_mock_route(
+        &h,
+        "sse-fail-http",
+        HttpMethod::Post,
+        guard.path("/sse/fail"),
+    )
+    .await;
+    let (addr, server_handle) = start_oagw_server(&h).await;
+
+    let response = http1_post(
+        addr,
+        &format!("/oagw/v1/proxy/sse-fail-http{}", guard.path("/sse/fail")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    assert_eq!(response.headers()["x-oagw-error-source"], "upstream");
+    let mut body = response.into_body();
+    let (data, end) = read_http_body(&mut body).await;
+    assert_eq!(data, b"data: one\n\ndata: two\n\n");
+    assert!(end.is_err(), "the broken stream passed for a complete one");
+
+    server_handle.abort();
+}
+
+/// A raw HTTP/1.1 upstream that answers each request with a chunked
+/// `content_type` head and one chunk in a single write, then closes (FIN)
+/// without the body's terminating chunk.
+async fn start_upstream_that_dies(content_type: &'static str) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match tcp.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\
+                     transfer-encoding: chunked\r\n\r\nb\r\ndata: one\n\n\r\n"
+                );
+                let _ = tcp.write_all(response.as_bytes()).await;
+                let _ = tcp.shutdown().await;
+            });
+        }
+    });
+    addr
+}
+
+/// The chunk and the upstream's EOF arrive together. The caller still gets
+/// the head and the chunk before the body breaks, every time.
+async fn assert_chunk_sent_just_before_the_upstream_dies_arrives(
+    alias: &str,
+    content_type: &'static str,
+) {
+    let upstream_addr = start_upstream_that_dies(content_type).await;
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: upstream_addr.port(),
+                    }],
+                },
+                HTTP_PROTOCOL_ID,
+            )
+            .alias(alias)
+            .build(),
+        )
+        .await
+        .unwrap();
+    h.facade()
+        .create_route(
+            ctx,
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: "/dies".into(),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+    let (addr, server_handle) = start_oagw_server(&h).await;
+
+    for _ in 0..20 {
+        let response = http1_post(addr, &format!("/oagw/v1/proxy/{alias}/dies")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], content_type);
+        let mut body = response.into_body();
+        let (data, end) = read_http_body(&mut body).await;
+        assert_eq!(data, b"data: one\n\n");
+        assert!(end.is_err(), "the broken body passed for a complete one");
+    }
+
+    server_handle.abort();
+}
+
+// 13.5: the event and the upstream's EOF arrive together. The caller still
+// gets the event before the body breaks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_sse_event_sent_just_before_the_upstream_dies_reaches_the_caller() {
+    assert_chunk_sent_just_before_the_upstream_dies_arrives("sse-dies", "text/event-stream").await;
+}
+
+// The same for a non-SSE body: the chunk is not lost with the body error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_chunk_sent_just_before_the_upstream_dies_reaches_the_caller() {
+    assert_chunk_sent_just_before_the_upstream_dies_arrives(
+        "download-dies",
+        "application/octet-stream",
+    )
+    .await;
+}
+
+// 13.3 over HTTP: an SSE request answered after the stop still gets its head,
+// then a broken body, not a dropped connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_sse_stream_cut_before_its_first_event_keeps_its_head() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/sse/hold",
+        sse_stream_mock(&["data: held\n\n"], MockStreamEnd::Hold),
+    );
+    let h = AppHarness::builder().build().await;
+    setup_mock_route(
+        &h,
+        "sse-stopped-http",
+        HttpMethod::Post,
+        guard.path("/sse/hold"),
+    )
+    .await;
+    let (addr, server_handle) = start_oagw_server(&h).await;
+
+    h.end_streams();
+    let response = http1_post(
+        addr,
+        &format!("/oagw/v1/proxy/sse-stopped-http{}", guard.path("/sse/hold")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body();
+    let (data, end) = read_http_body(&mut body).await;
+    assert!(data.is_empty(), "data after the stop: {data:?}");
+    assert!(end.is_err(), "the cut stream passed for a complete one");
+
+    server_handle.abort();
+}
+
+// 13.5 in process: an SDK reader gets the events, then a stream error.
+#[tokio::test]
+async fn proxy_sse_upstream_failure_mid_stream_is_a_stream_error() {
+    use futures_util::StreamExt as _;
+    use oagw_sdk::{ServerEvent, ServerEventsResponse, ServerEventsStream, StreamingError};
+
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/sse/fail",
+        sse_stream_mock(&["data: one\n\n"], MockStreamEnd::Abort),
+    );
+    let h = AppHarness::builder().build().await;
+    setup_mock_route(
+        &h,
+        "sse-fail-sdk",
+        HttpMethod::Post,
+        guard.path("/sse/fail"),
+    )
+    .await;
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("/sse-fail-sdk{}", guard.path("/sse/fail")))
+        .body(Body::from(r#"{"stream":true}"#))
+        .unwrap();
+    let response = h
+        .facade()
+        .proxy_request(h.security_context().clone(), req)
+        .await
+        .unwrap();
+    let ServerEventsResponse::Events(mut events) =
+        ServerEventsStream::from_response::<ServerEvent>(response)
+    else {
+        panic!("not an SSE response");
+    };
+    assert_eq!(events.next().await.unwrap().unwrap().data, "one");
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
+        .await
+        .expect("the upstream failure ends the stream");
+    assert!(
+        matches!(next, Some(Err(StreamingError::Stream(_)))),
+        "expected a stream error, got {next:?}"
+    );
+    assert!(events.next().await.is_none());
+}
+
 // 6.15: Upstream 500 error passthrough.
 #[tokio::test]
 async fn proxy_upstream_500_passthrough() {
@@ -1258,8 +1731,14 @@ async fn proxy_upstream_timeout_returns_504() {
         .uri(format!("/timeout-upstream{}", guard.path("/timeout")))
         .body(Body::Empty)
         .unwrap();
+    // The request went out before the deadline: a retry is safe only for
+    // idempotent methods.
     match h.facade().proxy_request(ctx.clone(), req).await {
-        Err(err) => assert!(matches!(err, CanonicalError::DeadlineExceeded { .. })),
+        Err(CanonicalError::DeadlineExceeded { ctx, .. }) => assert_eq!(
+            ctx.reason.as_deref(),
+            Some(oagw_sdk::reason::timeout::REQUEST_MAY_HAVE_BEEN_SENT)
+        ),
+        Err(err) => panic!("expected DeadlineExceeded, got {err:?}"),
         Ok(_) => panic!("expected timeout error"),
     }
 }
@@ -2018,24 +2497,19 @@ async fn proxy_all_backends_unreachable() {
         .body(Body::Empty)
         .unwrap();
 
-    match h.facade().proxy_request(ctx.clone(), req).await {
-        Err(err) => assert!(
-            matches!(err, CanonicalError::ServiceUnavailable { .. }),
-            "expected DownstreamError for unreachable backend, got: {err:?}"
-        ),
-        Ok(resp) => {
-            // A gateway-generated error response. An unreachable backend maps to 502 (DownstreamError
-            // — connection refused/closed), 503 (LinkUnavailable — no route),
-            // or 504 (connect timeout), depending on how the connection fails.
-            assert!(
-                resp.status() == StatusCode::BAD_GATEWAY
-                    || resp.status() == StatusCode::SERVICE_UNAVAILABLE
-                    || resp.status() == StatusCode::GATEWAY_TIMEOUT,
-                "expected 502, 503, or 504, got: {}",
-                resp.status()
-            );
-        }
-    }
+    // Nothing listens on the port: the connection is refused, a 502 that
+    // says the upstream was not contacted.
+    let err = h
+        .facade()
+        .proxy_request(ctx.clone(), req)
+        .await
+        .expect_err("an unreachable backend is a gateway error");
+    assert_eq!(err.status_code(), 502, "{err:?}");
+    assert!(
+        matches!(&err, CanonicalError::ServiceUnavailable { ctx, .. }
+            if ctx.reason.as_deref() == Some(oagw_sdk::reason::unavailable::REQUEST_NOT_SENT)),
+        "{err:?}"
+    );
 }
 
 // positive-2.13 (upstreams): CRUD invalidation — update upstream endpoints, verify new endpoint used.
@@ -2396,6 +2870,134 @@ async fn proxy_websocket_e2e_echo() {
     server_handle.abort();
 }
 
+/// A TLS WebSocket echo upstream on `/ws/echo`. It offers `h2` in ALPN but
+/// serves HTTP/1.1 only, so a gateway that offered `h2` for the upgrade
+/// fails the connection. Records the HTTP version of each upgrade request.
+async fn start_wss_echo() -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::Mutex<Vec<http::Version>>>,
+) {
+    use axum::extract::WebSocketUpgrade;
+    use axum::extract::ws::Message;
+
+    let mut tls = oagw::test_support::test_server_config();
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let versions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let seen = std::sync::Arc::clone(&versions);
+    let app = axum::Router::new().route(
+        "/ws/echo",
+        axum::routing::get(move |version: http::Version, ws: WebSocketUpgrade| {
+            seen.lock().unwrap().push(version);
+            async move {
+                ws.on_upgrade(|mut socket| async move {
+                    while let Some(Ok(msg)) = socket.recv().await {
+                        if matches!(msg, Message::Close(_)) || socket.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                continue;
+            };
+            let acceptor = acceptor.clone();
+            let app = app.clone();
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let _ = hyper_util::server::conn::auto::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                )
+                .http1_only()
+                .serve_connection_with_upgrades(
+                    hyper_util::rt::TokioIo::new(tls),
+                    hyper_util::service::TowerToHyperService::new(app),
+                )
+                .await;
+            });
+        }
+    });
+    (addr, versions)
+}
+
+// 14.1 over TLS: a `wss` upstream gets the upgrade as HTTP/1.1 inside TLS,
+// and frames go both ways through the relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proxy_websocket_round_trip_over_tls() {
+    use tokio::io::AsyncWriteExt;
+
+    let (upstream_addr, versions) = start_wss_echo().await;
+    let h = AppHarness::builder()
+        .with_skip_upstream_tls_verify(true)
+        .build()
+        .await;
+    let ctx = h.security_context().clone();
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Wss,
+                        host: "127.0.0.1".into(),
+                        port: upstream_addr.port(),
+                    }],
+                },
+                HTTP_PROTOCOL_ID,
+            )
+            .alias("wss-echo")
+            .build(),
+        )
+        .await
+        .unwrap();
+    h.facade()
+        .create_route(
+            ctx,
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Get],
+                        path: "/ws/echo".into(),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+    let (addr, server_handle) = start_oagw_server(&h).await;
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    ws_handshake(&mut stream, "/oagw/v1/proxy/wss-echo/ws/echo").await;
+    for payload in [b"over tls".as_slice(), b"second".as_slice()] {
+        stream
+            .write_all(&build_masked_frame(0x1, payload))
+            .await
+            .unwrap();
+        let (opcode, echoed) = read_ws_frame(&mut stream).await.expect("echo frame");
+        assert_eq!(opcode, 0x1, "expected text frame opcode");
+        assert_eq!(echoed, payload);
+    }
+    let seen = versions.lock().unwrap().clone();
+    assert_eq!(seen, [http::Version::HTTP_11]);
+
+    server_handle.abort();
+}
+
 // 14.2: Auth credentials are injected into the outbound WebSocket upgrade request.
 #[tokio::test]
 async fn proxy_websocket_auth_injected_during_handshake() {
@@ -2624,7 +3226,7 @@ async fn proxy_websocket_rate_limit_on_handshake() {
 // 14.4: WebSocket idle timeout — gateway closes the connection after inactivity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_websocket_idle_timeout_closes_connection() {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // 1000ms instead of 200ms: the readiness probe (Ping→Pong roundtrip
     // through proxy→upstream→proxy) can exceed 200ms under CI resource
@@ -2648,11 +3250,28 @@ async fn proxy_websocket_idle_timeout_closes_connection() {
     // Wait longer than the idle timeout (1s).
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // Expect EOF or close frame indicating gateway closed the connection.
-    if let Some((op, _)) = read_ws_frame(&mut stream).await {
-        // Close frame received; EOF (None) is also valid — gateway closed TCP.
-        assert_eq!(op, 0x8, "expected close frame after idle timeout");
-    }
+    // Close 1001 "Going Away", then the gateway half-closes: a bare EOF
+    // would be a dropped connection, not an idle close.
+    let mut close = [0u8; 14];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut close),
+    )
+    .await
+    .expect("the gateway sends a Close frame on idle")
+    .expect("a Close frame, not EOF");
+    let mut expected = vec![0x88, 0x0c, 0x03, 0xe9];
+    expected.extend_from_slice(b"Going Away");
+    assert_eq!(close.as_slice(), expected.as_slice());
+    let mut rest = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut rest),
+    )
+    .await
+    .expect("the gateway closes the connection after the Close frame")
+    .unwrap();
+    assert!(rest.is_empty(), "data after the Close frame: {rest:?}");
 
     server_handle.abort();
 }
@@ -4882,53 +5501,6 @@ async fn proxy_websocket_close_frame_propagated() {
     server_handle.abort();
 }
 
-// 14.6: Idle timeout sends Close 1001 (Going Away) to the client.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn proxy_websocket_idle_timeout_sends_1001() {
-    // See comment in `proxy_websocket_idle_timeout_closes_connection` — 200ms
-    // is too tight for CI; the readiness probe races the idle timer.
-    let h = AppHarness::builder()
-        .with_websocket_idle_timeout(std::time::Duration::from_secs(1))
-        .build()
-        .await;
-    setup_ws_upstream(&h, "ws-idle-1001").await;
-    let (addr, server_handle) = start_oagw_server(&h).await;
-
-    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    ws_handshake(&mut stream, "/oagw/v1/proxy/ws-idle-1001/ws/echo").await;
-
-    // Confirm connection works.
-    let text_frame = build_masked_frame(0x1, b"ping");
-    tokio::io::AsyncWriteExt::write_all(&mut stream, &text_frame)
-        .await
-        .unwrap();
-    let echo = read_ws_frame(&mut stream).await.unwrap();
-    assert_eq!(echo.0, 0x1);
-
-    // Wait for idle timeout to fire.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    // Should receive Close 1001.
-    let frame = read_ws_frame(&mut stream).await;
-    match frame {
-        Some((opcode, payload)) => {
-            assert_eq!(opcode, 0x8, "expected Close frame after idle timeout");
-            assert!(
-                payload.len() >= 2,
-                "close payload should contain status code"
-            );
-            let code = u16::from_be_bytes([payload[0], payload[1]]);
-            assert_eq!(code, 1001, "idle timeout should send Close 1001 Going Away");
-        }
-        None => {
-            // EOF is acceptable if the connection was torn down before we could read.
-            // The key assertion is that the gateway closed the connection.
-        }
-    }
-
-    server_handle.abort();
-}
-
 // 14.8: Caller disconnect mid-session triggers upstream Close.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_websocket_caller_disconnect_mid_session() {
@@ -5898,4 +6470,550 @@ async fn alternating_routes_do_not_refill_the_upstream_bucket() {
         });
     }
     assert_eq!(admitted, [true, true, false]);
+}
+
+// -- Circuit breaker (#4974) --
+
+/// A breaker that opens after two failures, stays open `timeout_seconds` and
+/// closes on one successful probe.
+fn breaker(timeout_seconds: u32) -> serde_json::Value {
+    json!({
+        "failure_threshold": 2,
+        "timeout_seconds": timeout_seconds,
+        "success_threshold": 1
+    })
+}
+
+/// An upstream at `endpoint` with `circuit_breaker`, and `GET /status` and
+/// `GET /ws/echo` routes. `alias` only for an IP endpoint: a host name is
+/// its own. Returns the upstream's JSON body.
+async fn breaker_upstream_at(
+    h: &AppHarness,
+    alias: Option<&str>,
+    endpoint: serde_json::Value,
+    circuit_breaker: serde_json::Value,
+) -> serde_json::Value {
+    let mut body = json!({
+        "server": {"endpoints": [endpoint]},
+        "protocol": HTTP_PROTOCOL_ID,
+        "circuit_breaker": circuit_breaker
+    });
+    if let Some(alias) = alias {
+        body["alias"] = json!(alias);
+    }
+    let upstream = h
+        .api_v1()
+        .post_upstream()
+        .with_body(body)
+        .expect_status(201)
+        .await
+        .json();
+    for path in ["/status", "/ws/echo"] {
+        h.api_v1()
+            .post_route()
+            .with_body(json!({
+                "upstream_id": upstream["id"],
+                "match": {"http": {"methods": ["GET"], "path": path}}
+            }))
+            .expect_status(201)
+            .await;
+    }
+    upstream
+}
+
+/// [`breaker_upstream_at`] the mock, with [`breaker`].
+async fn circuit_breaker_upstream(
+    h: &AppHarness,
+    alias: &str,
+    timeout_seconds: u32,
+) -> serde_json::Value {
+    breaker_upstream_at(
+        h,
+        Some(alias),
+        json!({"host": "127.0.0.1", "port": h.mock_port(), "scheme": "http"}),
+        breaker(timeout_seconds),
+    )
+    .await
+}
+
+/// The answer of the upstream, not of the gateway.
+fn assert_from_upstream(resp: &oagw::test_support::TestResponse, status: u16) {
+    resp.assert_status(status);
+    assert_eq!(resp.headers()["x-oagw-error-source"], "upstream");
+}
+
+/// The gateway's error with its own retry hint, not the breaker's.
+fn assert_gateway_error(resp: &oagw::test_support::TestResponse, status: u16, retry_after: &str) {
+    resp.assert_status(status);
+    assert_eq!(resp.headers()["x-oagw-error-source"], "gateway");
+    assert_eq!(resp.headers()["retry-after"], retry_after);
+}
+
+/// The gateway's fail-fast answer while the circuit is open, `retry_after`
+/// seconds before a probe.
+fn assert_circuit_open(resp: &oagw::test_support::TestResponse, retry_after: &str) {
+    resp.assert_status(503);
+    assert_eq!(resp.headers()["x-oagw-error-source"], "gateway");
+    assert_eq!(resp.headers()["retry-after"], retry_after);
+    let body = resp.json();
+    assert_eq!(body["status"], 503, "{body}");
+    assert!(
+        body["type"]
+            .as_str()
+            .is_some_and(|t| t.contains("service_unavailable")),
+        "{body}"
+    );
+}
+
+/// Consecutive upstream 503s open the circuit: the next request fails fast
+/// with 503 and `Retry-After` without reaching the upstream. After the
+/// timeout one probe goes through; its success closes the circuit, and a
+/// single failure no longer opens it.
+#[tokio::test]
+async fn circuit_breaker_opens_then_a_probe_closes_it() {
+    let h = AppHarness::builder().build().await;
+    let upstream = circuit_breaker_upstream(&h, "cb-open", 1).await;
+    assert_eq!(
+        upstream["circuit_breaker"],
+        json!({
+            "sharing": "private",
+            "enabled": true,
+            "failure_threshold": 2,
+            "timeout_seconds": 1,
+            "success_threshold": 1
+        })
+    );
+    let get = |code: u16| {
+        h.api_v1()
+            .proxy_get("cb-open", &format!("status/{code}"))
+            .send()
+    };
+
+    // A success in between resets the count.
+    assert_from_upstream(&get(503).await, 503);
+    get(200).await.assert_status(200);
+    assert_from_upstream(&get(502).await, 502);
+    assert_from_upstream(&get(504).await, 504);
+    assert_circuit_open(&get(200).await, "1");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    get(200).await.assert_status(200);
+    assert_from_upstream(&get(503).await, 503);
+    get(200).await.assert_status(200);
+}
+
+/// A failed probe opens the circuit again for another timeout.
+#[tokio::test]
+async fn circuit_breaker_failed_probe_reopens() {
+    let h = AppHarness::builder().build().await;
+    circuit_breaker_upstream(&h, "cb-reopen", 1).await;
+    let get = |code: u16| {
+        h.api_v1()
+            .proxy_get("cb-reopen", &format!("status/{code}"))
+            .send()
+    };
+    assert_from_upstream(&get(503).await, 503);
+    assert_from_upstream(&get(503).await, 503);
+    assert_circuit_open(&get(200).await, "1");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_from_upstream(&get(503).await, 503);
+    assert_circuit_open(&get(200).await, "1");
+}
+
+/// A write that changes the breaker or only the endpoints resets it at
+/// once; an unchanged write does not. Nothing here relies on the Control
+/// Plane dropping the breaker: the Data Plane rebuilds it on the next
+/// request, as another replica, which saw no write, does.
+#[tokio::test]
+async fn circuit_breaker_resets_on_config_or_endpoint_change() {
+    let h = AppHarness::builder().build().await;
+    let upstream = circuit_breaker_upstream(&h, "cb-reset", 60).await;
+    let id = upstream["id"].as_str().unwrap().to_owned();
+    let other = MockUpstream::start().await;
+    let get = |code: u16| {
+        h.api_v1()
+            .proxy_get("cb-reset", &format!("status/{code}"))
+            .send()
+    };
+    let put = |port: u16, failure_threshold: u32| {
+        h.api_v1()
+            .put_upstream(&id)
+            .with_body(json!({
+                "server": {
+                    "endpoints": [{"host": "127.0.0.1", "port": port, "scheme": "http"}]
+                },
+                "protocol": HTTP_PROTOCOL_ID,
+                "alias": "cb-reset",
+                "tags": [],
+                "enabled": true,
+                "circuit_breaker": {
+                    "failure_threshold": failure_threshold,
+                    "timeout_seconds": 60,
+                    "success_threshold": 1
+                }
+            }))
+            .expect_status(200)
+    };
+    let open = async || {
+        assert_from_upstream(&get(503).await, 503);
+        assert_from_upstream(&get(503).await, 503);
+        assert_circuit_open(&get(200).await, "60");
+    };
+
+    open().await;
+    put(h.mock_port(), 2).await;
+    assert_circuit_open(&get(200).await, "60");
+
+    // Same breaker, another endpoint.
+    put(other.addr().port(), 2).await;
+    get(200).await.assert_status(200);
+
+    open().await;
+    let updated = put(other.addr().port(), 3).await.json();
+    assert_eq!(updated["circuit_breaker"]["failure_threshold"], 3);
+    get(200).await.assert_status(200);
+}
+
+/// An omitted field takes the ADR-0005 default.
+#[tokio::test]
+async fn circuit_breaker_defaults() {
+    let h = AppHarness::builder().build().await;
+    let upstream = breaker_upstream_at(
+        &h,
+        Some("cb-defaults"),
+        json!({"host": "127.0.0.1", "port": h.mock_port(), "scheme": "http"}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        upstream["circuit_breaker"],
+        json!({
+            "sharing": "private",
+            "enabled": true,
+            "failure_threshold": 5,
+            "timeout_seconds": 30,
+            "success_threshold": 3
+        })
+    );
+}
+
+/// A misspelled field is refused like any other body that does not
+/// deserialize (422), and a value above its maximum is a 400: not a silent
+/// default or a breaker that stays open for months.
+#[tokio::test]
+async fn circuit_breaker_rejects_unknown_fields_and_values_too_large() {
+    let h = AppHarness::builder().build().await;
+    let post = |circuit_breaker: serde_json::Value| {
+        h.api_v1().post_upstream().with_body(json!({
+            "server": {
+                "endpoints": [{"host": "127.0.0.1", "port": h.mock_port(), "scheme": "http"}]
+            },
+            "protocol": HTTP_PROTOCOL_ID,
+            "circuit_breaker": circuit_breaker
+        }))
+    };
+    post(json!({"failure_treshold": 1}))
+        .expect_status(422)
+        .await;
+    for (circuit_breaker, detail) in [
+        (
+            json!({"failure_threshold": 1001}),
+            "circuit_breaker.failure_threshold must be at most 1000",
+        ),
+        (
+            json!({"timeout_seconds": 86_401}),
+            "circuit_breaker.timeout_seconds must be at most 86400",
+        ),
+        (
+            json!({"success_threshold": 101}),
+            "circuit_breaker.success_threshold must be at most 100",
+        ),
+    ] {
+        let body = post(circuit_breaker.clone())
+            .expect_status(400)
+            .await
+            .text();
+        assert!(body.contains(detail), "{circuit_breaker}: {body}");
+    }
+}
+
+/// A free local port nothing listens on.
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+/// An upstream that refuses connections opens the circuit.
+#[tokio::test]
+async fn circuit_breaker_opens_on_refused_connections() {
+    let h = AppHarness::builder().build().await;
+    breaker_upstream_at(
+        &h,
+        Some("cb-refused"),
+        json!({"host": "127.0.0.1", "port": closed_port(), "scheme": "http"}),
+        breaker(60),
+    )
+    .await;
+    // Refused: 502 with the transient hint.
+    let get = || h.api_v1().proxy_get("cb-refused", "status/200").send();
+    assert_gateway_error(&get().await, 502, "5");
+    assert_gateway_error(&get().await, 502, "5");
+    assert_circuit_open(&get().await, "60");
+}
+
+/// A host that does not resolve opens the circuit.
+#[tokio::test]
+async fn circuit_breaker_opens_on_dns_failures() {
+    let h = AppHarness::builder().build().await;
+    breaker_upstream_at(
+        &h,
+        None,
+        json!({"host": "oagw-cb-test.invalid", "port": 80, "scheme": "http"}),
+        breaker(60),
+    )
+    .await;
+    // Link unavailable: 503 with the link hint.
+    let get = || {
+        h.api_v1()
+            .proxy_get("oagw-cb-test.invalid", "status/200")
+            .send()
+    };
+    assert_gateway_error(&get().await, 503, "10");
+    assert_gateway_error(&get().await, 503, "10");
+    assert_circuit_open(&get().await, "60");
+}
+
+/// The SSRF policy refusing the upstream's addresses is the gateway's
+/// decision, not an upstream failure: the circuit stays closed.
+#[tokio::test]
+async fn circuit_breaker_ignores_ssrf_refusals() {
+    let h = AppHarness::builder()
+        .with_upstream_ssrf_policy()
+        .build()
+        .await;
+    let upstream = breaker_upstream_at(
+        &h,
+        None,
+        json!({"host": "localhost", "port": h.mock_port(), "scheme": "http"}),
+        json!({"failure_threshold": 1, "timeout_seconds": 60, "success_threshold": 1}),
+    )
+    .await;
+    let alias = upstream["alias"].as_str().unwrap();
+    for _ in 0..3 {
+        let resp = h.api_v1().proxy_get(alias, "status/200").send().await;
+        assert_gateway_error(&resp, 503, "10");
+    }
+}
+
+/// A client that trickles its body until the deadline is not an upstream
+/// failure: the circuit stays closed for everyone else.
+#[tokio::test]
+async fn circuit_breaker_ignores_a_slow_upload() {
+    use futures_util::StreamExt as _;
+    let h = AppHarness::builder()
+        .with_request_timeout(std::time::Duration::from_millis(300))
+        .build()
+        .await;
+    let ctx = h.security_context().clone();
+    let upstream = breaker_upstream_at(
+        &h,
+        Some("cb-slow-upload"),
+        json!({"host": "127.0.0.1", "port": h.mock_port(), "scheme": "http"}),
+        json!({"failure_threshold": 1, "timeout_seconds": 60, "success_threshold": 1}),
+    )
+    .await;
+    h.api_v1()
+        .post_route()
+        .with_body(json!({
+            "upstream_id": upstream["id"],
+            "match": {"http": {"methods": ["POST"], "path": "/echo"}}
+        }))
+        .expect_status(201)
+        .await;
+    for _ in 0..2 {
+        // One chunk, then nothing until the deadline.
+        let chunk: Result<bytes::Bytes, oagw_sdk::body::BoxError> =
+            Ok(bytes::Bytes::from_static(b"part"));
+        let stream: oagw_sdk::body::BodyStream =
+            Box::pin(futures_util::stream::iter([chunk]).chain(futures_util::stream::pending()));
+        let req = http::Request::builder()
+            .method(Method::POST)
+            .uri("/cb-slow-upload/echo")
+            .header(http::header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::Stream(stream))
+            .unwrap();
+        h.facade()
+            .proxy_request(ctx.clone(), req)
+            .await
+            .expect_err("the upload never ends");
+    }
+    h.api_v1()
+        .proxy_get("cb-slow-upload", "status/200")
+        .send()
+        .await
+        .assert_status(200);
+}
+
+/// A request pinned with `X-OAGW-Target-Host` to one endpoint of several
+/// says nothing about the others: failures on a dead endpoint leave the
+/// circuit closed (an open one would answer every request with its own
+/// 60 s hint).
+#[tokio::test]
+async fn circuit_breaker_ignores_requests_pinned_to_one_endpoint() {
+    let h = AppHarness::builder().build().await;
+    let upstream = h
+        .api_v1()
+        .post_upstream()
+        .with_body(json!({
+            "alias": "cb-pinned",
+            "server": {"endpoints": [
+                {"host": "localhost", "port": h.mock_port(), "scheme": "http"},
+                {"host": "oagw-cb-pinned.invalid", "port": h.mock_port(), "scheme": "http"}
+            ]},
+            "protocol": HTTP_PROTOCOL_ID,
+            "circuit_breaker": {"failure_threshold": 1, "timeout_seconds": 60, "success_threshold": 1}
+        }))
+        .expect_status(201)
+        .await
+        .json();
+    h.api_v1()
+        .post_route()
+        .with_body(json!({
+            "upstream_id": upstream["id"],
+            "match": {"http": {"methods": ["GET"], "path": "/status"}}
+        }))
+        .expect_status(201)
+        .await;
+    let pinned = |host: &'static str| {
+        h.api_v1()
+            .proxy_get("cb-pinned", "status/200")
+            .with_header(
+                http::HeaderName::from_static("x-oagw-target-host"),
+                http::HeaderValue::from_static(host),
+            )
+            .send()
+    };
+    for _ in 0..3 {
+        // Link unavailable, not the open circuit.
+        assert_gateway_error(&pinned("oagw-cb-pinned.invalid").await, 503, "10");
+    }
+}
+
+/// Requests the open circuit rejects take no rate-limit tokens: once a
+/// config change closes it, the whole budget is left.
+#[tokio::test]
+async fn circuit_breaker_rejections_take_no_rate_limit_tokens() {
+    let h = AppHarness::builder().build().await;
+    let body = |failure_threshold: u32| {
+        json!({
+            "server": {
+                "endpoints": [{"host": "127.0.0.1", "port": h.mock_port(), "scheme": "http"}]
+            },
+            "protocol": HTTP_PROTOCOL_ID,
+            "alias": "cb-rate",
+            "tags": [],
+            "enabled": true,
+            "rate_limit": {
+                "algorithm": "token_bucket",
+                "sustained": {"rate": 3, "window": "minute"},
+                "burst": {"capacity": 3},
+                "scope": "tenant",
+                "strategy": "reject"
+            },
+            "circuit_breaker": {
+                "failure_threshold": failure_threshold,
+                "timeout_seconds": 60,
+                "success_threshold": 1
+            }
+        })
+    };
+    let upstream = h
+        .api_v1()
+        .post_upstream()
+        .with_body(body(1))
+        .expect_status(201)
+        .await
+        .json();
+    let id = upstream["id"].as_str().unwrap().to_owned();
+    h.api_v1()
+        .post_route()
+        .with_body(json!({
+            "upstream_id": upstream["id"],
+            "match": {"http": {"methods": ["GET"], "path": "/status"}}
+        }))
+        .expect_status(201)
+        .await;
+    let get = |code: u16| {
+        h.api_v1()
+            .proxy_get("cb-rate", &format!("status/{code}"))
+            .send()
+    };
+
+    assert_from_upstream(&get(503).await, 503);
+    for _ in 0..5 {
+        assert_circuit_open(&get(200).await, "60");
+    }
+    h.api_v1()
+        .put_upstream(&id)
+        .with_body(body(2))
+        .expect_status(200)
+        .await;
+    get(200).await.assert_status(200);
+    get(200).await.assert_status(200);
+    get(200).await.assert_status(429);
+}
+
+/// A WebSocket upgrade request for `path` on `alias`.
+fn ws_upgrade(alias: &str, path: &str) -> http::Request<Body> {
+    http::Request::builder()
+        .method(Method::GET)
+        .uri(format!("/{alias}/{path}"))
+        .header("upgrade", "websocket")
+        .header("connection", "Upgrade")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header("sec-websocket-version", "13")
+        .body(Body::Empty)
+        .unwrap()
+}
+
+/// A WebSocket handshake counts like a request: the upstream refusing it
+/// with 503 is a failure, so two of them open the circuit and the next
+/// upgrade fails fast. After the timeout a 101 is a successful probe that
+/// closes the circuit. What happens on an open tunnel is not counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn circuit_breaker_counts_websocket_handshakes() {
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+    circuit_breaker_upstream(&h, "cb-ws", 1).await;
+    let refused = || ws_upgrade("cb-ws", "status/503");
+    let echo = || ws_upgrade("cb-ws", "ws/echo");
+    // The refused handshake is a 502 with the transient hint; the open
+    // circuit a plain 503 with the breaker's.
+    let retry_after = |err: CanonicalError| {
+        let status = err.http_status_override();
+        match err {
+            CanonicalError::ServiceUnavailable { ctx, .. } => (status, ctx.retry_after_seconds),
+            other => panic!("expected ServiceUnavailable, got {other:?}"),
+        }
+    };
+    let proxy = |req| h.facade().proxy_request(ctx.clone(), req);
+    for _ in 0..2 {
+        let err = proxy(refused()).await.expect_err("the upstream refuses");
+        assert_eq!(retry_after(err), (Some(502), Some(5)));
+    }
+    let err = proxy(echo()).await.expect_err("the circuit is open");
+    assert_eq!(retry_after(err), (None, Some(1)));
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let tunnel = proxy(echo()).await.expect("the probe switches protocols");
+    assert_eq!(tunnel.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+    // Closed: one refusal does not open it, and a tunnel cut off after it
+    // does not count as the second failure.
+    let err = proxy(refused()).await.expect_err("the upstream refuses");
+    assert_eq!(retry_after(err), (Some(502), Some(5)));
+    drop(tunnel);
+    let tunnel = proxy(echo()).await.expect("the circuit is closed");
+    assert_eq!(tunnel.status(), StatusCode::SWITCHING_PROTOCOLS);
 }

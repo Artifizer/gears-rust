@@ -8,12 +8,14 @@ use crate::domain::gts_helpers::{
     IMPLEMENTED_GUARD_PLUGIN_IDS, IMPLEMENTED_TRANSFORM_PLUGIN_IDS, TRANSFORM_PLUGIN_SCHEMA,
 };
 use crate::domain::model::{
-    AuthConfig, CorsConfig, CreateRouteRequest, CreateUpstreamRequest, Endpoint, HeadersConfig,
-    HttpMatch, HttpMethod, MatchRules, PluginsConfig, RateLimitAlgorithm, RateLimitConfig, Route,
-    Scheme, UpdateRouteRequest, UpdateUpstreamRequest,
+    AuthConfig, CircuitBreakerConfig, CorsConfig, CreateRouteRequest, CreateUpstreamRequest,
+    Endpoint, HeadersConfig, HttpMatch, HttpMethod, MatchRules, PluginsConfig, RateLimitAlgorithm,
+    RateLimitConfig, Route, Scheme, UpdateRouteRequest, UpdateUpstreamRequest,
 };
+use crate::domain::plugin::aws_sigv4::AwsSigV4AuthConfig;
 use crate::domain::plugin::credentials::{
-    ApiKeyAuthConfig, AuthConfigError, parse_credential_mode, parse_request_secret_types,
+    ApiKeyAuthConfig, AuthConfigError, PrivateKeyJwtConfig, parse_credential_mode,
+    parse_request_secret_types,
 };
 use crate::domain::repo::RowKey;
 use crate::domain::ssrf::SsrfGuard;
@@ -37,6 +39,7 @@ pub(in crate::domain::services) fn validate_upstream_request(
         req.plugins.as_ref(),
         req.cors.as_ref(),
         req.rate_limit.as_ref(),
+        req.circuit_breaker.as_ref(),
         &req.server.endpoints,
     )?;
     match req.alias.as_deref() {
@@ -62,6 +65,7 @@ pub(in crate::domain::services) fn validate_upstream_update_request(
         req.plugins.as_ref(),
         req.cors.as_ref(),
         req.rate_limit.as_ref(),
+        req.circuit_breaker.as_ref(),
         &req.server.endpoints,
     )
 }
@@ -80,6 +84,7 @@ fn validate_upstream_content(
     plugins: Option<&PluginsConfig>,
     cors: Option<&CorsConfig>,
     rate_limit: Option<&RateLimitConfig>,
+    circuit_breaker: Option<&CircuitBreakerConfig>,
     endpoints: &[Endpoint],
 ) -> Result<(), DomainError> {
     validate_tags(tags)?;
@@ -90,6 +95,7 @@ fn validate_upstream_content(
     validate_endpoints(endpoints)?;
     forbid_http_endpoints(endpoints, allow_http, "")?;
     validate_endpoints_ssrf(ssrf, endpoints)?;
+    forbid_ipv6_endpoints(endpoints)?;
     if let Some(cors) = cors {
         crate::domain::cors::validate_cors_config(cors)?;
     }
@@ -98,6 +104,9 @@ fn validate_upstream_content(
     }
     if let Some(budget) = rate_limit.and_then(|rl| rl.budget.as_ref()) {
         validate_budget_config(budget)?;
+    }
+    if let Some(circuit_breaker) = circuit_breaker {
+        validate_circuit_breaker_values(circuit_breaker)?;
     }
     if let Some(auth) = auth {
         for credential in auth.credential_refs() {
@@ -108,10 +117,15 @@ fn validate_upstream_content(
     Ok(())
 }
 
-/// `credential_mode` and `request_secret_types` (ADR-0022), and the API-key
-/// plugin's own keys. The API-key plugin's config goes through
+/// `credential_mode` and `request_secret_types` (ADR-0022), and the
+/// plugin-specific keys of the API-key, AWS SigV4 and `private_key_jwt`
+/// plugins. The API-key plugin's config goes through
 /// [`ApiKeyAuthConfig::parse`], the parser the plugin and the proxy use,
-/// plus the write-only [`ApiKeyAuthConfig::check_write_policy`]. Another
+/// plus the write-only [`ApiKeyAuthConfig::check_write_policy`]; the AWS
+/// SigV4 plugin's through [`AwsSigV4AuthConfig::parse`] and the
+/// `private_key_jwt` plugin's through [`PrivateKeyJwtConfig::parse`], the
+/// parsers the plugins use, so a required key is checked even when absent
+/// (the credential reference loop sees only the keys present). Another
 /// plugin may carry `credential_mode` and `request_secret_types` (they mean
 /// nothing there), but they must still be well-formed. A `request_ref`
 /// default `secret_ref` is a credential reference like any other and gets
@@ -123,6 +137,14 @@ fn validate_credential_mode(auth: &AuthConfig) -> Result<(), DomainError> {
         return ApiKeyAuthConfig::parse(config)
             .and_then(|parsed| parsed.check_write_policy())
             .map_err(to_domain);
+    }
+    if auth.plugin_type == crate::domain::gts_helpers::AWS_SIGV4_AUTH_PLUGIN_ID {
+        AwsSigV4AuthConfig::parse(config).map_err(to_domain)?;
+    }
+    if auth.plugin_type
+        == crate::domain::gts_helpers::OAUTH2_CLIENT_CRED_PRIVATE_KEY_JWT_AUTH_PLUGIN_ID
+    {
+        PrivateKeyJwtConfig::parse(config).map_err(to_domain)?;
     }
     let mode = parse_credential_mode(config).map_err(to_domain)?;
     parse_request_secret_types(config, mode)
@@ -273,6 +295,45 @@ fn validate_rate_limit_values(rate_limit: &RateLimitConfig) -> Result<(), Domain
             "rate_limit.cost ({}) must not exceed rate_limit.{field} ({capacity})",
             rate_limit.cost
         )));
+    }
+    Ok(())
+}
+
+/// A circuit breaker that can open and close again (`inst-cfg-5`): with a
+/// zero threshold or timeout it would never let a request through or never
+/// recover. The upper bounds keep a typo (milliseconds as seconds) from
+/// failing an upstream fast for months, an enforced one for every
+/// descendant; `timeout_seconds` is capped at a day, as the proxy timeout.
+/// Checked whether or not it is `enabled`, so enabling it later cannot store
+/// a broken config.
+fn validate_circuit_breaker_values(cb: &CircuitBreakerConfig) -> Result<(), DomainError> {
+    for (field, value, max) in [
+        (
+            "failure_threshold",
+            cb.failure_threshold,
+            u64::from(CircuitBreakerConfig::MAX_FAILURE_THRESHOLD),
+        ),
+        (
+            "timeout_seconds",
+            cb.timeout_seconds,
+            crate::config::MAX_PROXY_TIMEOUT_SECS,
+        ),
+        (
+            "success_threshold",
+            cb.success_threshold,
+            u64::from(CircuitBreakerConfig::MAX_SUCCESS_THRESHOLD),
+        ),
+    ] {
+        if value == 0 {
+            return Err(DomainError::validation(format!(
+                "circuit_breaker.{field} must be at least 1"
+            )));
+        }
+        if u64::from(value) > max {
+            return Err(DomainError::validation(format!(
+                "circuit_breaker.{field} must be at most {max}"
+            )));
+        }
     }
     Ok(())
 }
@@ -532,19 +593,6 @@ pub(in crate::domain::services) fn validate_endpoints(
         }
     }
 
-    // IPv6 endpoints are not yet supported — reject early with a clear message.
-    // SSRF protections for IPv6 (link-local, ULA, IPv4-mapped, etc.) are in
-    // place (`ssrf.rs`), but the proxy and endpoint infrastructure has not been
-    // tested with IPv6 upstream addresses yet.
-    for (i, ep) in endpoints.iter().enumerate() {
-        if ep.normalized_host().parse::<std::net::Ipv6Addr>().is_ok() {
-            return Err(DomainError::validation(format!(
-                "endpoint[{i}] uses IPv6 address '{}'; IPv6 endpoints are not yet supported",
-                ep.host
-            )));
-        }
-    }
-
     // Check all-IP vs all-hostname consistency.
     let ip_count = endpoints.iter().filter(|ep| ep.is_ip()).count();
     if ip_count != 0 && ip_count != endpoints.len() {
@@ -580,6 +628,23 @@ pub(in crate::domain::services) fn validate_endpoints(
         }
     }
 
+    Ok(())
+}
+
+/// Refuse IPv6 address endpoints: the proxy has not been tested with IPv6
+/// upstreams yet. Runs after the SSRF check, so an address in a denied range
+/// is refused with its SSRF reason.
+pub(in crate::domain::services) fn forbid_ipv6_endpoints(
+    endpoints: &[Endpoint],
+) -> Result<(), DomainError> {
+    for (i, ep) in endpoints.iter().enumerate() {
+        if ep.normalized_host().parse::<std::net::Ipv6Addr>().is_ok() {
+            return Err(DomainError::validation(format!(
+                "endpoint[{i}] uses IPv6 address '{}'; IPv6 endpoints are not yet supported",
+                ep.host
+            )));
+        }
+    }
     Ok(())
 }
 

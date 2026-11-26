@@ -50,6 +50,8 @@ Configure how OAGW authenticates to the external service.
 
 - [API key injection](proxy-api/authentication/positive-9.2-api-key-injection.md) — header-based key injection from `cred_store`
 - [OAuth2 client credentials](proxy-api/authentication/positive-9.5-oauth2-client-credentials.md) — automatic token fetch + cache + refresh
+- [AWS SigV4](proxy-api/authentication/positive-9.11-aws-sigv4-signed-request.md) — Signature Version 4 with IAM access keys (Bedrock, S3, other AWS APIs)
+- [OAuth2 client credentials with `private_key_jwt`](proxy-api/authentication/positive-9.15-oauth2-client-credentials-private-key-jwt.md) — the client signs a JWT assertion with a key from `cred_store` instead of sending a secret
 - [Noop (public APIs)](proxy-api/authentication/positive-9.1-noop-auth-plugin-forwards-credential-injection.md) — no credential injection
 - See → [Injecting authentication](#injecting-authentication)
 
@@ -118,7 +120,7 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 
 #### Create HTTP route with method + path
 - **Scenario**: [positive-3.1-create-http-route-method-path.md](management-api/routes/positive-3.1-create-http-route-method-path.md)
-- **Mechanism**: `POST /routes` with `match.http.methods` and `match.http.path`. Returns `201`. Route is associated to the target upstream.
+- **Mechanism**: `POST /routes` with `match.http.methods` and `match.http.path`. Returns `201`. Route is associated to the target upstream. Methods: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`, each listed explicitly (`GET` does not imply `HEAD`).
 
 #### Path suffix mode = append (prefix routes for REST resources)
 - **Scenario**: [positive-3.5-path-suffix-mode-append.md](management-api/routes/positive-3.5-path-suffix-mode-append.md)
@@ -192,6 +194,17 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 - **Scenario**: [positive-9.6-oauth2-client-credentials.md](proxy-api/authentication/positive-9.6-oauth2-client-credentials.md)
 - **Mechanism**: Some token endpoints require `client_id/client_secret` via basic auth. Token request uses correct client authentication.
 
+#### AWS SigV4 signed request
+- **Scenario**: [positive-9.11-aws-sigv4-signed-request.md](proxy-api/authentication/positive-9.11-aws-sigv4-signed-request.md)
+- **Mechanism**: `aws_sigv4` signs in the signing phase ([ADR-0023](../docs/ADR/0023-request-signing.md)), on the request as sent: `Authorization`, `X-Amz-Date`, `X-Amz-Content-Sha256` and, with `session_token_ref`, `X-Amz-Security-Token`. Signs `host`, every `x-amz-*`, `content-type`, `content-md5`. The query goes out in SigV4 encoding, exactly as signed. A wrong secret reaches the upstream and its `403` is passed through. A missing `region`, `service` or key reference is a `400` naming the key on write.
+
+#### AWS SigV4: client signing headers
+- **Scenario**: [positive-9.13-aws-sigv4-client-amz-headers.md](proxy-api/authentication/positive-9.13-aws-sigv4-client-amz-headers.md)
+- **Mechanism**: A client's `X-Amz-Date`, `X-Amz-Content-Sha256` and `X-Amz-Security-Token` are replaced by the plugin's; other `x-amz-*` headers are signed as sent. Without `session_token_ref`, a client `X-Amz-Security-Token` cannot be removed by the signer and the request is refused (`400 VALIDATION` on field `x-amz-security-token`); `headers.request.remove` drops it.
+#### OAuth2 client credentials (`private_key_jwt` client)
+- **Scenario**: [positive-9.15-oauth2-client-credentials-private-key-jwt.md](proxy-api/authentication/positive-9.15-oauth2-client-credentials-private-key-jwt.md)
+- **Mechanism**: The client authenticates with a JWT assertion (RFC 7523 §2.2) signed with `ES256`, `RS256` or `PS256` by a PKCS#8 key read from `cred_store` (`private_key_ref`); no secret is sent. The access token is cached as for 9.5. An optional `audience` replaces the token endpoint as the assertion's `aud`; `x5t` / `x5t#S256` headers are not supported. An unusable key (wrong type, or an `id-RSASSA-PSS` RSA key) is a `500`; a config with neither or both of `token_endpoint` and `issuer_url`, both `client_secret_ref` and `private_key_ref`, no key reference, an unknown `signing_alg` or a bad `kid` or `audience` is refused on write (`400`).
+
 #### Per-request secret references (`X-OAGW-Secret-Ref`)
 - **Scenario**: [positive-31.1-inject-requested-secret.md](request-secret-refs/positive-31.1-inject-requested-secret.md)
 - **Mechanism**: API-key auth with `credential_mode` = `request_ref`. The caller names a CredStore secret per request; OAGW reads it as the caller and injects it when its owner and type pass the upstream's guards. See [Per-request secret references](#per-request-secret-references).
@@ -206,11 +219,11 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 
 #### Inbound → outbound path + query mapping for HTTP
 - **Scenario**: [positive-7.1-inbound-outbound-path-query-mapping-http.md](proxy-api/request-transforms/positive-7.1-inbound-outbound-path-query-mapping-http.md)
-- **Mechanism**: Outbound path = `route.match.http.path` (+ suffix if enabled). Only allowlisted query params forwarded.
+- **Mechanism**: Outbound path = `route.match.http.path` (+ suffix if enabled). A query parameter the allowlist does not name is rejected; an accepted query is forwarded as sent.
 
 #### Hop-by-hop headers stripped
 - **Scenario**: [positive-7.2-hop-hop-headers-stripped.md](proxy-api/request-transforms/positive-7.2-hop-hop-headers-stripped.md)
-- **Mechanism**: `Connection`, `Upgrade`, `Transfer-Encoding`, `TE`, etc. do not reach upstream unless explicitly allowed by protocol handler. Under `passthrough: all`, client forwarding and override headers (`Forwarded`, `Via`, `X-Forwarded-*`, `X-Real-IP`, ...) are not forwarded unless the allowlist names them. With an auth plugin, repeated and non-UTF-8 client headers reach the upstream unchanged; only the plugin's header is replaced. A transform plugin rewrites only the header names it changes; the credential and other lines keep their bytes and sensitive flag, request and response.
+- **Mechanism**: On a plain request (not a WebSocket handshake), `Connection`, `Upgrade`, `Transfer-Encoding`, `TE`, etc. and the headers `Connection` nominates do not reach upstream unless explicitly allowed by protocol handler. Under `passthrough: all`, client forwarding and override headers (`Forwarded`, `Via`, `X-Forwarded-*`, `X-Real-IP`, ...) are not forwarded unless the allowlist names them. With an auth plugin, repeated and non-UTF-8 client headers reach the upstream unchanged; only the plugin's header is replaced. A transform plugin rewrites only the header names it changes; the credential and other lines keep their bytes and sensitive flag, request and response.
 
 #### Host header replaced by upstream host
 - **Scenario**: [positive-7.3-host-header-replaced-upstream-host.md](proxy-api/request-transforms/positive-7.3-host-header-replaced-upstream-host.md)
@@ -223,6 +236,10 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 #### Request correlation headers propagate end-to-end
 - **Scenario**: [positive-7.6-request-correlation-headers-propagate-end-end.md](proxy-api/request-transforms/positive-7.6-request-correlation-headers-propagate-end-end.md)
 - **Mechanism**: Client `X-Request-ID` forwarded to upstream and included in response. If absent, gateway generates one.
+
+#### Query forwarded as sent
+- **Scenario**: [positive-7.8-raw-query-forwarded-as-sent.md](proxy-api/request-transforms/positive-7.8-raw-query-forwarded-as-sent.md)
+- **Mechanism**: The upstream gets the client's query byte for byte: `%2B` vs `+`, `%20`, unescaped reserved characters, characters the gateway used to escape, raw UTF-8 bytes, repeated keys, empty values, keys without `=`, escape case and order. The allowlist checks the names decoded as `application/x-www-form-urlencoded` (`my%20key` and `my+key` are `my key`). A transform that changes the pairs, or a literal `;` (which the allowlist does not split on and some upstreams do), makes the gateway form-encode them again.
 
 ---
 
@@ -296,6 +313,14 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 - **Scenario**: [positive-18.7-budget-modes-behave-specified.md](rate-limiting/positive-18.7-budget-modes-behave-specified.md)
 - **Mechanism**: `allocated` rejects when the sum of direct allocations exceeds `total * overcommit_ratio`; a parent's change of budget or window is re-checked. `shared` adds one pool bucket of `total` per the owner's window that every tenant drawing on it shares, next to each tenant's own bucket. An upstream whose effective `cost` exceeds the pool's `total` is rejected on write. `unlimited` skips validation.
 
+#### Half-open probes close the circuit on recovery
+- **Scenario**: [positive-18.10-half-open-probe-closes-circuit.md](rate-limiting/positive-18.10-half-open-probe-closes-circuit.md)
+- **Mechanism**: After `timeout_seconds` an open circuit lets `success_threshold` probes through. All succeed → closed, and failures count from 0 again. One fails → open for another `timeout_seconds`.
+
+#### A changed breaker or a deleted upstream resets the circuit
+- **Scenario**: [positive-18.11-config-change-or-delete-resets-circuit.md](rate-limiting/positive-18.11-config-change-or-delete-resets-circuit.md)
+- **Mechanism**: A changed effective `circuit_breaker`, alias or endpoint list starts a closed breaker on the next request, on every replica; a write that changes or removes `circuit_breaker`, and a delete, discard the breaker on the replica that handles it, and idle breakers are evicted elsewhere. A removed and re-added breaker starts closed. An unchanged write keeps an open circuit open.
+
 #### A changed or removed limit applies at once
 - **Scenario**: *No separate file. Covered by the tests `changing_a_rate_limit_drops_the_exhausted_bucket` and `writes_drop_the_buckets_they_make_stale`.*
 - **Mechanism**: The Control Plane and the Data Plane share one limiter. A write that changes or removes an upstream or route rate limit drops its buckets on every write path (REST, SDK, registry), so a caller exhausted under the old limit is admitted under the new one. A write that keeps the limit keeps the buckets. A bucket reached with another config without such a write (a merged limit that differs by tenant chain, a write on another replica) keeps what it consumed (`token_bucket_config_change_keeps_what_was_consumed`).
@@ -322,6 +347,14 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 - **Scenario**: [positive-12.4-http-version-negotiation.md](protocols/http/positive-12.4-http-version-negotiation.md)
 - **Mechanism**: First call attempts HTTP/2 via ALPN. On failure, falls back to HTTP/1.1. Subsequent calls use cached protocol decision.
 
+#### HEAD returns the upstream's head without a body
+- **Scenario**: [positive-12.8-head-request-returns-upstream-head.md](protocols/http/positive-12.8-head-request-returns-upstream-head.md)
+- **Mechanism**: A route that lists `HEAD` proxies it; the client gets the upstream's status and headers, `Content-Length` included, and no body, also for an event stream. `GET` does not imply `HEAD`: a `GET`-only route answers `HEAD` with `404`.
+
+#### OPTIONS routed; CORS preflight answered by the gateway
+- **Scenario**: [positive-12.9-options-routed-preflight-answered-gateway.md](protocols/http/positive-12.9-options-routed-preflight-answered-gateway.md)
+- **Mechanism**: A route that lists `OPTIONS` proxies it, with or without `Origin`. A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) gets the gateway's permissive `204` and never reaches the upstream. Without a route for `OPTIONS`, `404`. With the API gateway's `cors_enabled`, the gateway answers every `OPTIONS` itself.
+
 ---
 
 ### Streaming (SSE)
@@ -336,7 +369,7 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 
 #### SSE stream ends when the gear stops
 - **Scenario**: [positive-13.3-sse-stream-ends-on-gear-stop.md](protocols/sse/positive-13.3-sse-stream-ends-on-gear-stop.md)
-- **Mechanism**: Server shutdown or gear stop ends open SSE streams (and sends Close 1001 on WebSocket relays) before the HTTP drain, also a stream opened before the first start or one that starts waiting after the stop was signalled. A later start lets new streams run.
+- **Mechanism**: Server shutdown or gear stop ends open SSE streams (and sends Close 1001 on WebSocket relays) before the HTTP drain, also a stream opened before the first start or one that starts waiting after the stop was signalled. Non-SSE bodies are not cut: they finish within the HTTP drain deadline. A later start lets new streams run.
 
 ---
 
@@ -388,7 +421,7 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 
 #### Built-in CORS handling (preflight + actual request)
 - **Scenario**: [positive-10.2-built-cors-handling.md](plugins/guards/positive-10.2-built-cors-handling.md)
-- **Mechanism**: OPTIONS preflight returns permissive `204` at handler level (no upstream resolution). Origin enforcement happens on actual requests after upstream resolution — disallowed origins are rejected with `403` before reaching the upstream. Allowed origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, etc.).
+- **Mechanism**: A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) returns permissive `204` at handler level (no upstream resolution); other `OPTIONS` requests are routed ([12.9](protocols/http/positive-12.9-options-routed-preflight-answered-gateway.md)). Origin enforcement happens on actual requests after upstream resolution — disallowed origins are rejected with `403` before reaching the upstream. Allowed origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, etc.).
 
 #### Hierarchical merge/union for CORS allowed origins
 - **Scenario**: *Covered within hierarchical configuration scenarios.*
@@ -424,7 +457,7 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 
 #### on_error transform handles gateway errors
 - **Scenario**: [positive-11.5-error-transform-handles-gateway-errors.md](plugins/transforms/positive-11.5-error-transform-handles-gateway-errors.md)
-- **Mechanism**: For a gateway error (e.g., rate limit), `on_error` can rewrite `title/detail` and status if allowed.
+- **Mechanism**: `on_error` runs only for gateway-originated errors of the upstream exchange (connection failure, timeout, protocol error, body limit, response guard rejection). A WebSocket upgrade does not run it: a failed upgrade returns its gateway error without `on_error`. It gets the error type, the status and the detail, and cannot change the response. An upstream 4xx/5xx response goes through `on_response`, not `on_error`, and reaches the client as the upstream sent it (part B).
 
 #### Plugin ordering and layering (upstream before route)
 - **Scenario**: [positive-11.6-plugin-ordering-layering.md](plugins/transforms/positive-11.6-plugin-ordering-layering.md)
@@ -450,13 +483,13 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 - **Scenario**: *Section 22.1 — no separate file. Verified as part of management auth scenarios.*
 - **Mechanism**: Unauthenticated `GET /metrics` rejected. Non-admin rejected.
 
-#### Request metrics increment on success
+#### Request metrics count every request
 - **Scenario**: *Section 22.2 — no separate file.*
-- **Mechanism**: `oagw_requests_total` increments with correct labels (`host`, `http.request.method`, `http.route`, `http.response.status_code`). Histogram `phase=total/upstream/plugins` recorded.
+- **Mechanism**: `oagw_requests_total` increments once per request with a response, with correct labels (`host`, `http.request.method`, `http.route`, `http.response.status_code`): the upstream's status, 4xx/5xx included, or for a gateway error (401, 403, 429, 502, ...) the status the client gets. Histogram `oagw_request_duration_seconds` records `phase=total` (request start to the response head), `resolve`, `auth` and, for an auth plugin that signs, `sign`. Verified by Rust unit tests: the e2e suite has no metrics collector.
 
 #### Error metrics increment on gateway errors
 - **Scenario**: *Section 22.3 — no separate file.*
-- **Mechanism**: Induce gateway error; `oagw_errors_total{error_type=...}` increments.
+- **Mechanism**: Induce gateway error; `oagw_errors_total{error_type=...}` increments, and `oagw_requests_total` counts the request with the error's status. A request the REST handler rejects after the `proxy:invoke` grant (bad proxy path 400, body over the limit 413, failed body read) counts the same way under `host="unknown"`. A request the client drops before its response head counts only as `error_type="Cancelled"`.
 
 #### Cardinality rules (no tenant labels)
 - **Scenario**: *Section 22.4 — no separate file.*
@@ -465,6 +498,14 @@ Call your external service through OAGW's proxy endpoint: `{METHOD} /api/oagw/v1
 #### Status label follows OTel HTTP semantic conventions
 - **Scenario**: *Section 22.5 — no separate file.*
 - **Mechanism**: Metrics export uses the numeric `http.response.status_code` attribute (OTel HTTP semconv), matching the inbound API Gateway. Status-class queries (e.g. 5xx error rate) are expressed at query time via regex on the numeric code.
+
+#### In-flight and stream duration last until the body ends
+- **Scenario**: *Section 22.6 — no separate file.*
+- **Mechanism**: `oagw_requests_in_flight` rises at the start of the Data Plane pipeline (under `host="unknown"` until the upstream is resolved) and falls when the response body ends, fails or is dropped, SSE streams included; a gateway error falls at once. `oagw_stream_duration_seconds{outcome}` is recorded then: `completed` (EOF, or the declared `Content-Length` relayed, as hyper drops such a body without reading its end), `error` (upstream cut, idle timeout), `shutdown` (gateway stop) or `cancelled` (client went away). `oagw_websocket_session_duration_seconds` carries the same `outcome`: `completed` when the tunnel closed, from either side (the relay does not parse frames, and after a client-initiated Close the server closes TCP first), `error` on an idle timeout or an IO error, `shutdown` on a gateway stop.
+
+#### Rate-limit metrics per bucket
+- **Scenario**: *Section 22.7 — no separate file.*
+- **Mechanism**: `oagw_rate_limit_usage_ratio` and `oagw_rate_limit_exceeded_total` carry `bucket` (`route`, `shadowed_route`, `upstream`, `pool`): each bucket checked writes its own series, so a wider bucket does not overwrite the route's ratio. The shadowed ancestor routes of one route share the `shadowed_route` series, written once per request with the highest ratio among them.
 
 #### Proxy requests produce structured audit log
 - **Scenario**: *Section 23.1 — no separate file.*
@@ -570,7 +611,7 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 
 #### Method allowlist enforcement → 404
 - **Scenario**: [negative-3.2-method-allowlist-enforcement.md](management-api/routes/negative-3.2-method-allowlist-enforcement.md)
-- **What happens**: Route allows `POST`; invoking `GET` returns `404 ROUTE_NOT_FOUND` as a gateway error.
+- **What happens**: Route allows `POST`; invoking `GET` returns `404 ROUTE_NOT_FOUND` as a gateway error. `HEAD` and `OPTIONS` match only routes that list them ([12.8](protocols/http/positive-12.8-head-request-returns-upstream-head.md), [12.9](protocols/http/positive-12.9-options-routed-preflight-answered-gateway.md)).
 
 #### Query allowlist enforcement → 400
 - **Scenario**: [negative-3.3-query-allowlist-enforcement.md](management-api/routes/negative-3.3-query-allowlist-enforcement.md)
@@ -586,7 +627,7 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 
 #### Write-time validation → 400
 - **Scenario**: [negative-2.15-write-validation-rejected-400.md](management-api/upstreams/negative-2.15-write-validation-rejected-400.md)
-- **What happens**: Port 0, a tag outside `^[a-z0-9_-]+$`, an alias starting or ending with `.`, `-` or `:`, an empty or relative HTTP route path, an empty method list, a rate limit value of 0, a rate limit `cost` above the bucket capacity or above the `budget.total` of the shared pool the upstream draws on, a plugin id that is not implemented, or an `http` endpoint while `allow_http_upstream` is off returns `400 PD` (`invalid_argument`). Nothing is stored.
+- **What happens**: Port 0, a tag outside `^[a-z0-9_-]+$`, an alias starting or ending with `.`, `-` or `:`, an empty or relative HTTP route path, an empty method list, a rate limit value of 0, a circuit breaker `failure_threshold`, `timeout_seconds` or `success_threshold` of 0 or above its maximum (1000, 86400, 100), a rate limit `cost` above the bucket capacity or above the `budget.total` of the shared pool the upstream draws on, a plugin id that is not implemented, or an `http` endpoint while `allow_http_upstream` is off returns `400 PD` (`invalid_argument`). Nothing is stored.
 
 #### Stored field limits → 400
 - **Scenario**: [negative-2.14-field-limits-rejected-400.md](management-api/upstreams/negative-2.14-field-limits-rejected-400.md)
@@ -596,9 +637,9 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 - **Scenario**: [negative-7.4-well-known-header-validation-errors-400.md](proxy-api/request-transforms/negative-7.4-well-known-header-validation-errors-400.md)
 - **What happens**: Invalid `Content-Length` or mismatch with actual body returns `400 PD`.
 
-#### Maximum body size limit enforced (100MB) → 413
+#### Maximum body size limit enforced → 413
 - **Scenario**: [negative-8.1-maximum-body-size-limit-enforced.md](proxy-api/body-validation/negative-8.1-maximum-body-size-limit-enforced.md)
-- **What happens**: Body > 100MB rejected early with `413 PD`, `ESrc=gateway`.
+- **What happens**: The smaller of OAGW's `max_body_size_bytes` (default and maximum 100 MiB) and the api-gateway's `body_limit_bytes` (default 16 MiB) applies. Over OAGW's limit → `413 PD` (`PAYLOAD_TOO_LARGE`), `ESrc=gateway`, rejected early. Over the api-gateway's limit → `413` `about:blank` PD from the outer layer, no `ESrc`.
 
 #### Transfer-Encoding support limited to chunked → 400
 - **Scenario**: [negative-8.2-transfer-encoding-support-limited-chunked.md](proxy-api/body-validation/negative-8.2-transfer-encoding-support-limited-chunked.md)
@@ -618,7 +659,7 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 
 #### Disable upstream blocks proxy traffic → 503
 - **Scenario**: [negative-2.6-disable-upstream-blocks-proxy-traffic.md](management-api/upstreams/negative-2.6-disable-upstream-blocks-proxy-traffic.md)
-- **What happens**: With `enabled=false`, proxy returns `503 PD`, `ESrc=gateway`. Disabled in ancestor → disabled for descendants too.
+- **What happens**: With `enabled=false`, proxy returns `503 PD` (`service_unavailable`, reason `UPSTREAM_DISABLED`), `Retry-After: 300`, `ESrc=gateway`. Disabled in ancestor → disabled for descendants too.
 
 #### Alias uniqueness enforced per tenant → conflict
 - **Scenario**: [negative-2.8-alias-uniqueness-enforced-per-tenant.md](management-api/upstreams/negative-2.8-alias-uniqueness-enforced-per-tenant.md)
@@ -676,6 +717,14 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 - **Scenario**: *Section 26.3 — no separate file.*
 - **What happens**: Using HTTP route against `protocol=grpc` upstream fails with `502 ProtocolError` (`PD`).
 
+#### Non-public IPv6 address refused at write and at connect → 400
+- **Scenario**: [negative-26.4-non-public-ipv6-address-refused.md](proxy-api/ssrf/negative-26.4-non-public-ipv6-address-refused.md)
+- **What happens**: An IP endpoint in a non-public IPv6 range (IANA special-purpose blocks not globally reachable, `fec0::/10`, `ff00::/8`, anything else outside `2000::/3`) is refused on write with `400` naming the range. A hostname resolving into one is never connected to (Rust tests only).
+
+#### IPv6 deny CIDR does not refuse an IPv4 destination → allowed
+- **Scenario**: [positive-26.5-ipv6-deny-cidr-does-not-refuse-ipv4.md](proxy-api/ssrf/positive-26.5-ipv6-deny-cidr-does-not-refuse-ipv4.md)
+- **What happens**: `extra_deny_cidrs: ["::/3"]` does not refuse `8.8.8.8` or `::ffff:8.8.8.8`; `allow_cidrs: ["::/0"]` does not admit `10.0.0.1`. CIDRs match addresses of their own family only (Rust tests only).
+
 ---
 
 ### Plugin enforcement
@@ -688,9 +737,21 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 - **Scenario**: [negative-4.4-plugin-type-enforcement.md](management-api/plugins/negative-4.4-plugin-type-enforcement.md)
 - **What happens**: Attaching `plugin.guard` where auth is expected fails at config validation (`400`).
 
-#### Secret access control via cred_store → 401/500
+#### Secret access control via cred_store → 401
 - **Scenario**: [negative-9.7-secret-access-control-cred-store.md](proxy-api/authentication/negative-9.7-secret-access-control-cred-store.md)
-- **What happens**: If `cred_store` denies access, proxy returns `401 AuthenticationFailed`. A missing secret is rejected when the upstream is written (`400 failed_precondition` naming the key); one deleted after the write returns `500 SecretNotFound`. Neither the response nor the server log contains the reference; they name the auth config key.
+- **What happens**: A missing secret is rejected when the upstream is written (`400 failed_precondition` naming the key). At proxy time a secret `cred_store` denies, or one deleted after the write, returns `401 PD` (`unauthenticated`, reason `AUTH_CREDENTIAL_NOT_FOUND`), for every auth plugin. A credential store outage is `503` (`CREDENTIAL_STORE_UNAVAILABLE`), an identity provider outage `503` (`IDENTITY_PROVIDER_UNAVAILABLE`, 9.11), an invalid identity provider response `502`, a plugin misconfiguration (for example a `private_key_jwt` key of the wrong type) `500`. The response contains neither the reference nor the key; the server log names the key.
+
+#### OAuth2 identity provider unavailable → 503
+- **Scenario**: [negative-9.11-oauth2-identity-provider-unavailable.md](proxy-api/authentication/negative-9.11-oauth2-identity-provider-unavailable.md)
+- **What happens**: The OAuth2 token endpoint is unreachable, times out or answers `408`, `429` or `5xx`: `503` `service_unavailable`, reason `IDENTITY_PROVIDER_UNAVAILABLE`, `Retry-After: 5`. The upstream is not contacted. A credential store outage keeps `CREDENTIAL_STORE_UNAVAILABLE`.
+
+#### AWS SigV4 with a streamed request body → 400
+- **Scenario**: [negative-9.12-aws-sigv4-streamed-body.md](proxy-api/authentication/negative-9.12-aws-sigv4-streamed-body.md)
+- **What happens**: A body streamed by an in-process SDK caller cannot be hashed: `400 VALIDATION` on field `body`, naming `auth.config.unsigned_payload`, nothing sent. With `unsigned_payload: true` it is signed as `UNSIGNED-PAYLOAD`. REST callers are always buffered.
+
+#### AWS SigV4 for S3 on a path the gateway rewrote → 400
+- **Scenario**: [negative-9.14-aws-sigv4-s3-rewritten-path.md](proxy-api/authentication/negative-9.14-aws-sigv4-s3-rewritten-path.md)
+- **What happens**: With `uri_encoding: single` (the S3 signing names), a client path with `//`, `.`/`..` segments or a trailing `/` the gateway removed would sign and address another object key: `400 VALIDATION` on field `path`, nothing sent. A trailing `/` is compared with the URL as built: one the route path gives back is not a rewrite, one it adds (route `/dir/`, request `/dir`) is; `double` encoding signs the normalized path.
 
 #### Descendant override permissions enforced → blocked
 - **Scenario**: [negative-9.9-descendant-override-permissions-enforced.md](proxy-api/authentication/negative-9.9-descendant-override-permissions-enforced.md)
@@ -707,6 +768,10 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 #### Sliding window strictness → no boundary bursts
 - **Scenario**: [negative-18.2-sliding-window-strictness.md](rate-limiting/negative-18.2-sliding-window-strictness.md)
 - **What happens**: Requests across a window boundary do not allow 2x burst.
+
+#### Circuit opens after consecutive failures → 503
+- **Scenario**: [negative-18.9-circuit-opens-after-consecutive-failures.md](rate-limiting/negative-18.9-circuit-opens-after-consecutive-failures.md)
+- **What happens**: After `failure_threshold` failures in a row (upstream `502`/`503`/`504`, connect, TLS or DNS errors, a timeout the upstream had its full budget for), requests fail fast with `503 PD` (`service_unavailable`, reason `REQUEST_NOT_SENT`), `ESrc=gateway` and `Retry-After` = time left until a probe, without reaching the upstream. Per replica, shared by every tenant on the upstream: SSRF refusals, gateway errors, client cancellations and timeouts after a slow CredStore read do not count.
 
 #### Spoofed forwarding headers → same IP bucket
 - **Scenario**: [negative-18.8-spoofed-forwarding-headers-keep-the-ip-bucket.md](rate-limiting/negative-18.8-spoofed-forwarding-headers-keep-the-ip-bucket.md)
@@ -768,7 +833,7 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 
 #### Upstream error passthrough with ESrc=upstream
 - **Scenario**: [negative-12.2-upstream-error-passthrough-esrc-upstream.md](protocols/http/negative-12.2-upstream-error-passthrough-esrc-upstream.md)
-- **What happens**: Upstream returns `500` with JSON body. OAGW keeps body intact, sets `ESrc=upstream`.
+- **What happens**: Upstream returns `500` with JSON body. OAGW keeps body intact, sets `ESrc=upstream`. The upstream's own `Retry-After` and `WWW-Authenticate` pass through unchanged.
 
 #### Gateway error uses PD + ESrc=gateway
 - **Scenario**: [negative-12.3-gateway-error-uses-pd-esrc-gateway.md](protocols/http/negative-12.3-gateway-error-uses-pd-esrc-gateway.md)
@@ -778,6 +843,14 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 - **Scenario**: [negative-12.6-no-automatic-retries-upstream-failures.md](protocols/http/negative-12.6-no-automatic-retries-upstream-failures.md)
 - **What happens**: Upstream transient `5xx` or connection close → OAGW returns error once. Upstream sees single request attempt.
 
+#### Transport failure before sending → REQUEST_NOT_SENT
+- **Scenario**: [negative-12.8-transport-failure-before-sending-request-not-sent.md](protocols/http/negative-12.8-transport-failure-before-sending-request-not-sent.md)
+- **What happens**: Connection refused or TLS handshake failure → `502 PD` (`service_unavailable`, reason `REQUEST_NOT_SENT`), `Retry-After: 5`, `ESrc=gateway`. DNS, SSRF and no-route failures are `503`, connect timeouts `504`, with the same reason. Any method can be retried.
+
+#### Transport failure after sending → REQUEST_MAY_HAVE_BEEN_SENT
+- **Scenario**: [negative-12.9-transport-failure-after-sending-request-may-have-been-sent.md](protocols/http/negative-12.9-transport-failure-after-sending-request-may-have-been-sent.md)
+- **What happens**: Upstream reads the request and closes without answering → `502 PD` (reason `REQUEST_MAY_HAVE_BEEN_SENT`), `ESrc=gateway`. Read/write errors, HTTP/2 and protocol errors are `502`, read and request timeouts `504`, with the same reason. Retry only idempotent requests.
+
 #### Scheme/protocol mismatches fail explicitly
 - **Scenario**: [negative-12.7-scheme-protocol-mismatches-fail-explicitly.md](protocols/http/negative-12.7-scheme-protocol-mismatches-fail-explicitly.md)
 - **What happens**: `protocol=http` with `scheme=grpc` rejected at config validation. `protocol=grpc` with `scheme=https` yields `502 ProtocolError`.
@@ -785,6 +858,14 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 #### gRPC status mapping and error source
 - **Scenario**: [negative-15.4-grpc-status-mapping-error-source.md](protocols/grpc/negative-15.4-grpc-status-mapping-error-source.md)
 - **What happens**: gRPC `RESOURCE_EXHAUSTED` maps to rate limit error. Upstream gRPC failures marked `ESrc=upstream`.
+
+#### SSE idle timeout ends the stream with an error
+- **Scenario**: [negative-13.4-sse-idle-timeout-ends-stream-with-error.md](protocols/sse/negative-13.4-sse-idle-timeout-ends-stream-with-error.md)
+- **What happens**: Upstream silent past `streaming_idle_timeout_secs` → body aborted after the events sent (no terminating chunk), nothing injected; SDK gets `StreamingError::IdleTimeout`.
+
+#### Upstream failure mid-stream breaks the SSE stream
+- **Scenario**: [negative-13.5-upstream-failure-mid-stream-breaks-stream.md](protocols/sse/negative-13.5-upstream-failure-mid-stream-breaks-stream.md)
+- **What happens**: Upstream drops the connection after the head → caller gets the events sent, then a broken body; no JSON after the head; SDK gets `StreamingError::Stream`.
 
 ---
 
@@ -796,7 +877,7 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 
 #### WS connection idle timeout enforced
 - **Scenario**: [negative-14.4-ws-connection-idle-timeout-enforced.md](protocols/websocket/negative-14.4-ws-connection-idle-timeout-enforced.md)
-- **What happens**: Idle connection closed after configured timeout.
+- **What happens**: Idle connection gets Close 1001 (Going Away) after the configured timeout, then EOF. A bare EOF fails.
 
 #### Stalled caller does not block upstream's graceful close
 - **Scenario**: [negative-14.5-stalled-caller-does-not-block-upstream-close.md](protocols/websocket/negative-14.5-stalled-caller-does-not-block-upstream-close.md)
@@ -818,17 +899,23 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 - **Scenario**: *Section 24.3 — no separate file.*
 - **What happens**: `429`, `503 link unavailable`, `503 circuit breaker open`, `504` timeouts include `Retry-After`.
 
+#### Gateway 502/503/504 from the upstream exchange carry a dispatch reason
+- **Scenario**: [12.8](protocols/http/negative-12.8-transport-failure-before-sending-request-not-sent.md), [12.9](protocols/http/negative-12.9-transport-failure-after-sending-request-may-have-been-sent.md).
+- **What happens**: `context.reason` is `REQUEST_NOT_SENT` or `REQUEST_MAY_HAVE_BEEN_SENT`, set from the engine error kind; a failed resend after a first attempt the upstream may have processed is `REQUEST_MAY_HAVE_BEEN_SENT`. A disabled upstream's `503` carries `UPSTREAM_DISABLED`, a credential store outage `CREDENTIAL_STORE_UNAVAILABLE`, an OAuth2 identity provider outage `IDENTITY_PROVIDER_UNAVAILABLE`.
+
 #### Stream aborted classified distinctly
 - **Scenario**: *Section 24.4 — no separate file.*
-- **What happens**: Abort SSE/WS mid-flight → classified as `StreamAborted`.
+- **What happens**: Upstream read/write failure before the response head → `502 StreamAborted`. After the head no status can follow: the body is aborted instead (13.5).
 
 #### Every documented error type has at least one reproducer
 - **Scenario**: *Section 24.5 — no separate file.*
-- **What happens**: `ValidationError`, `RouteNotFound`, `AuthenticationFailed`, `PayloadTooLarge`, `RateLimitExceeded`, `SecretNotFound`, `ProtocolError`, `DownstreamError`, `StreamAborted`, `LinkUnavailable`, `CircuitBreakerOpen`, `ConnectionTimeout`, `RequestTimeout`, `IdleTimeout`, `PluginNotFound`, `PluginInUse` — each has at least one reproducer scenario.
+- **What happens**: `ValidationError`, `RouteNotFound`, `AuthenticationFailed`, `PayloadTooLarge`, `RateLimitExceeded`, `SecretNotFound` (401), `UpstreamDisabled`, `CredentialStoreUnavailable`, `IdpUnavailable`, `ProtocolError`, `DownstreamError`, `StreamAborted`, `LinkUnavailable`, `CircuitBreakerOpen`, `ConnectionTimeout`, `RequestTimeout`, `IdleTimeout`, `PluginNotFound`, `PluginInUse` — each has at least one reproducer scenario.
 
 ---
 
-### Concurrency & circuit breaker (future-facing)
+### Concurrency & per-endpoint circuit scope (future-facing)
+
+Upstream circuit breakers are implemented: [18.9](rate-limiting/negative-18.9-circuit-opens-after-consecutive-failures.md), [18.10](rate-limiting/positive-18.10-half-open-probe-closes-circuit.md), [18.11](rate-limiting/positive-18.11-config-change-or-delete-resets-circuit.md).
 
 #### Concurrency limit rejects when max in-flight reached → 503
 - *No scenario file (future-facing).*
@@ -842,17 +929,9 @@ Full integration walkthroughs — each demonstrates the complete journey (upstre
 - *No scenario file (future-facing).*
 - **What happens**: SSE and WS hold concurrency permit until closed.
 
-#### Circuit opens after consecutive failures → 503
-- *No scenario file (future-facing).*
-- **What happens**: After threshold, requests fail fast with `503 circuit_breaker.open` + `Retry-After`.
-
-#### Half-open probing closes circuit on recovery
-- *No scenario file (future-facing).*
-- **What happens**: After open timeout, limited probes allowed. Success threshold closes circuit.
-
 #### Per-endpoint circuit scope
 - *No scenario file (future-facing).*
-- **What happens**: With `scope=per_endpoint`, failures isolate to single endpoint.
+- **What happens**: With `scope=per_endpoint`, failures isolate to single endpoint. Today one breaker covers all endpoints of an upstream.
 
 ---
 
@@ -893,6 +972,7 @@ For E2E coverage, ensure at least one scenario exists for each cell:
 - `bearer`: HTTP
 - `oauth2.client_cred`: HTTP
 - `oauth2.client_cred_basic`: HTTP
+- `aws_sigv4`: HTTP, WebSocket handshake (signed with an empty payload), SSE responses
 
 ### Plugin chain phases
 - Guard-only (`on_request`)

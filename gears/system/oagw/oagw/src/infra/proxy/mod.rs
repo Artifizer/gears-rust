@@ -4,6 +4,8 @@
 pub(crate) use crate::domain::gateway_headers::HOP_BY_HOP_HEADERS;
 
 #[cfg(test)]
+mod aws_sigv4_tests;
+#[cfg(test)]
 pub(crate) mod credstore_spy;
 /// Health-checked, DNS-refreshed endpoint selection.
 pub(crate) mod endpoint_selector;
@@ -19,6 +21,10 @@ pub(crate) mod secret_ref;
 mod secret_ref_tests;
 /// Data-plane service implementation.
 pub(crate) mod service;
+/// The auth plugin's signing phase (ADR-0023).
+pub(crate) mod signing;
+#[cfg(test)]
+mod signing_tests;
 /// Lifecycle management for streamed (SSE) response bodies.
 pub(crate) mod streaming;
 /// WebSocket tunnel relay.

@@ -117,9 +117,9 @@ impl EnforcerError {
     ///
     /// True only for [`EnforcerError::EvaluationFailed`] carrying
     /// [`CanonicalError::ServiceUnavailable`] or
-    /// [`CanonicalError::DeadlineExceeded`], including the enforcer's own
-    /// evaluation deadline. Any other evaluation failure (`Internal` among
-    /// them), a refusal and a compile failure are false.
+    /// [`CanonicalError::DeadlineExceeded`]. The enforcer's own evaluation
+    /// deadline surfaces as `ServiceUnavailable`. Any other evaluation failure
+    /// (`Internal` among them), a refusal and a compile failure are false.
     ///
     /// It describes the cause, not whether a retry is safe: that depends on
     /// the operation and its idempotency. Recommended mapping for new or
@@ -183,6 +183,8 @@ pub enum AccessDenial {
 ///
 /// ```ignore
 /// use authz_resolver_sdk::pep::{AccessRequest, PolicyEnforcer, ResourceType};
+/// use authz_resolver_sdk::{BarrierMode, TenantMode};
+/// use toolkit_security::pep_properties;
 ///
 /// // CREATE with target tenant + resource properties (constrained scope)
 /// let scope = enforcer.access_scope_with(
@@ -217,7 +219,10 @@ impl AccessRequest {
         Self::default()
     }
 
-    /// Add a single resource property for ABAC evaluation.
+    /// Request an equality condition on the target resource.
+    ///
+    /// The SDK forwards this value. It does not yet verify that every
+    /// returned branch contains the requested equality.
     #[must_use]
     pub fn resource_property(
         mut self,
@@ -236,7 +241,7 @@ impl AccessRequest {
         self
     }
 
-    /// Override the context tenant ID (default: subject's tenant).
+    /// Set the context tenant ID. If omitted, the PDP determines the context.
     #[must_use]
     pub fn context_tenant_id(mut self, id: Uuid) -> Self {
         self.tenant_context.get_or_insert_default().root_id = Some(id);
@@ -278,11 +283,10 @@ impl AccessRequest {
     /// `allow_all()` (no row-level filtering). If the PDP still returns
     /// constraints, they are compiled normally.
     ///
-    /// Primary use cases:
-    /// - **GET with prefetch**: if scope is unconstrained, return the
-    ///   prefetched entity directly; otherwise do a scoped re-read.
-    /// - **CREATE**: if scope is unconstrained, skip insert validation;
-    ///   otherwise validate the insert against the scope.
+    /// Keep the default for resource operations. Apply the scope to a GET
+    /// query and validate proposed CREATE values against it. Use `false` only
+    /// for a standalone decision-only gate. If the PDP supplies constraints,
+    /// the gate must enforce them or refuse the operation.
     #[must_use]
     pub fn require_constraints(mut self, require: bool) -> Self {
         self.require_constraints = Some(require);
@@ -396,6 +400,16 @@ impl ResourceType {
     }
 }
 
+/// Default PEP-side deadline for a single PDP `evaluate` call.
+///
+/// `evaluate` sits on the request-gating hot path and, out-of-process, is a
+/// network round-trip. This bounds it independently of the generic REST client
+/// default so a hung/unresponsive `authz-resolver` cannot stall consumers
+/// indefinitely. The default is intentionally generous — it is a hang guard,
+/// not a latency SLO; set a tighter value on latency-sensitive gating paths
+/// with [`PolicyEnforcer::with_deadline`].
+pub const DEFAULT_EVAL_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Policy Enforcement Point.
 ///
 /// Holds the `AuthZ` client and optional PEP capabilities.
@@ -407,6 +421,7 @@ impl ResourceType {
 ///
 /// ```ignore
 /// use authz_resolver_sdk::pep::{PolicyEnforcer, ResourceType};
+/// use toolkit_gts::gts_id;
 /// use toolkit_security::pep_properties;
 ///
 /// const USER: ResourceType = ResourceType::from_static(
@@ -416,20 +431,10 @@ impl ResourceType {
 ///
 /// let enforcer = PolicyEnforcer::new(authz.clone());
 ///
-/// // All CRUD operations return AccessScope (PDP always returns constraints)
+/// // Resource operations require constraints on a permit.
 /// let scope = enforcer.access_scope(&ctx, &USER, "get", Some(id)).await?;
 /// let scope = enforcer.access_scope(&ctx, &USER, "create", None).await?;
 /// ```
-/// Default PEP-side deadline for a single PDP `evaluate` call.
-///
-/// `evaluate` sits on the request-gating hot path and, out-of-process, is a
-/// network round-trip. This bounds it independently of the generic REST client
-/// default so a hung/unresponsive `authz-resolver` cannot stall consumers
-/// indefinitely. The default is intentionally generous — it is a hang guard,
-/// not a latency SLO; set a tighter value on latency-sensitive gating paths
-/// with [`PolicyEnforcer::with_deadline`].
-pub const DEFAULT_EVAL_DEADLINE: Duration = Duration::from_secs(30);
-
 #[derive(Clone)]
 pub struct PolicyEnforcer {
     authz: AuthzSource,
@@ -527,8 +532,8 @@ impl PolicyEnforcer {
 
     // ── Low-level: build request only ────────────────────────────────
 
-    /// Build an evaluation request using the subject's tenant as context tenant
-    /// and default settings.
+    /// Build an evaluation request with the caller's tenant in the subject
+    /// properties. The tenant context is omitted so the PDP can resolve it.
     #[must_use]
     pub fn build_request(
         &self,
@@ -649,8 +654,8 @@ impl PolicyEnforcer {
     /// Execute the full PEP flow with constraints: build request → evaluate
     /// → compile constraints to `AccessScope`.
     ///
-    /// Always sets `require_constraints=true`. PDP returns constraints for
-    /// all CRUD operations (GET, LIST, UPDATE, DELETE, CREATE).
+    /// Always requests constraints. A permit with absent or empty outer
+    /// constraints fails compilation.
     ///
     /// Refuses empty scopes. Use [`Self::access_scope_with`] and
     /// [`AccessRequest::allow_empty_scope`] for queries that preserve them.
@@ -690,9 +695,9 @@ impl PolicyEnforcer {
     /// or return them for queries/catalog gates. The returned scope is always
     /// normalized: [`AccessScope::constraints`] holds only live branches.
     ///
-    /// Discarding `Ok(scope)` after `?` is valid only for action-level permission
-    /// gates. Row access must enforce the scope, which may cover another tenant
-    /// or owner.
+    /// A decision-only gate that cannot enforce row predicates must check
+    /// that the returned scope is unconstrained. Resource access must apply
+    /// the scope to the operation.
     ///
     /// # Errors
     ///
@@ -732,8 +737,10 @@ impl PolicyEnforcer {
         // credential-free plane marker; the caller identity (`ctx`) is conveyed
         // to the PDP as `req.subject`, built above (`cpt-cf-adr-two-plane-auth`).
         // Bound the PDP call: `evaluate` gates every request and is a network
-        // round-trip out-of-process, so a slow/unresponsive PDP must fail fast
-        // (retryable) rather than cascade into blocked consumers.
+        // round-trip out-of-process, so a hung PDP must not block consumers
+        // indefinitely. `self.deadline` is a hang guard (see
+        // `DEFAULT_EVAL_DEADLINE`); on expiry the call fails with
+        // `ServiceUnavailable`.
         let response = match tokio::time::timeout(
             self.deadline,
             authz.evaluate(PlatformSecurityContext::outbound_marker(), eval_request),

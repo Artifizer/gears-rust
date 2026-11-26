@@ -218,7 +218,7 @@ The system **MUST** provide CRUD operations for upstream configurations. Each up
 
 - [ ] `p1` - **ID**: `cpt-cf-oagw-fr-route-mgmt`
 
-The system **MUST** provide CRUD operations for routes. Routes define matching rules (HTTP method, path pattern, query parameter allowlist) that map inbound proxy requests to specific upstreams.
+The system **MUST** provide CRUD operations for routes. Routes define matching rules (HTTP method, path pattern, query parameter allowlist) that map inbound proxy requests to specific upstreams. A route lists its methods explicitly, from `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD` and `OPTIONS`; `GET` does not imply `HEAD`.
 
 - **Rationale**: Routes control which requests reach which upstream endpoints and with what transformations.
 - **Actors**: `cpt-cf-oagw-actor-platform-operator`, `cpt-cf-oagw-actor-tenant-admin`
@@ -247,7 +247,7 @@ The system **MUST** persist upstreams and routes created through the Management 
 
 - [ ] `p1` - **ID**: `cpt-cf-oagw-fr-request-proxy`
 
-The system **MUST** proxy requests via `{METHOD} /api/oagw/v1/proxy/{alias}[/{path}][?{query}]`. It **MUST** resolve the upstream by alias, match the route by method/path, merge configurations (upstream < route < tenant), execute the plugin chain, and forward the request to the external service. The gateway performs no automatic full client-request retries—i.e., it will not re-issue the original client request as a whole—but connector-level endpoint/connection failover or connection-retry attempts (endpoint-level retries) performed by the upstream connector are permitted.
+The system **MUST** proxy requests via `{METHOD} /api/oagw/v1/proxy/{alias}[/{path}][?{query}]`. It **MUST** resolve the upstream by alias, match the route by method/path, merge configurations (upstream < route < tenant), execute the plugin chain, and forward the request to the external service. The query **MUST** reach the external service as the client sent it, unless a transform plugin changed it or it has a literal `;` (then it is form-encoded, so an upstream that splits on `;` sees the parameters the allowlist checked). The gateway performs no automatic full client-request retries—i.e., it will not re-issue the original client request as a whole—but connector-level endpoint/connection failover or connection-retry attempts (endpoint-level retries) performed by the upstream connector are permitted.
 
 - **Rationale**: Core value proposition — unified proxy endpoint that handles credential injection, transformation, and forwarding transparently.
 - **Actors**: `cpt-cf-oagw-actor-app-developer`
@@ -303,6 +303,8 @@ The system **MUST** include the following built-in plugins:
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1` — API key injection (header/query)
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred.v1` — OAuth2 client credentials flow
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred_basic.v1` — OAuth2 with Basic auth
+- `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.aws_sigv4.v1` — AWS Signature Version 4 request signing with IAM access keys (Bedrock, S3, other AWS APIs); signs the final outbound request ([ADR-0023](./ADR/0023-request-signing.md))
+- `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred_private_key_jwt.v1` — OAuth2 with `private_key_jwt` client authentication (RFC 7523): a JWT signed by a key from `cred_store` (`ES256`, `RS256`, `PS256`) instead of a client secret
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.basic.v1` — HTTP Basic authentication; catalog identifier only, no backing `AuthPlugin` implementation
 - `gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.bearer.v1` — Bearer token injection; catalog identifier only, no backing `AuthPlugin` implementation
 
@@ -473,10 +475,13 @@ The system **MUST** return the following error codes for proxy and management op
 | 404  | RouteNotFound        | No        |
 | 413  | PayloadTooLarge      | No        |
 | 429  | RateLimitExceeded    | Yes       |
-| 500  | SecretNotFound       | No        |
+| 401  | SecretNotFound (reason `AUTH_CREDENTIAL_NOT_FOUND`) | No |
+| 500  | Internal (including auth plugin misconfiguration) | No |
 | 502  | DownstreamError      | Depends   |
-| 503  | CircuitBreakerOpen   | Yes       |
+| 503  | CircuitBreakerOpen, UpstreamDisabled, CredentialStoreUnavailable, IdpUnavailable | Yes |
 | 504  | Timeout              | Yes       |
+
+A gateway 502, 503 or 504 from the upstream exchange **MUST** carry a `reason` that says whether the request may have reached the upstream (`REQUEST_NOT_SENT` or `REQUEST_MAY_HAVE_BEEN_SENT`), so a client can tell whether retrying a non-idempotent request is safe. A disabled upstream's 503 carries `UPSTREAM_DISABLED`.
 
 - **Rationale**: Consistent, well-defined error codes enable clients to implement correct retry and fallback behavior.
 - **Actors**: `cpt-cf-oagw-actor-app-developer`
@@ -506,6 +511,7 @@ The system **MUST** add less than 10ms overhead at p95 for proxy requests. Plugi
 The system **MUST** maintain 99.9% availability. Circuit breakers **MUST** prevent cascade failures from unhealthy upstreams.
 
 - **Threshold**: 99.9% uptime; circuit breaker trips within 5 failed requests in 30s window
+- **Implementation note**: Upstream circuit breakers trip after `failure_threshold` (default 5) consecutive failures, with no time window, and are kept per replica in memory: each replica trips on the failures it sees. A breaker is shared by every tenant on the upstream and counts only failures the upstream caused (`502`/`503`/`504`, connect, TLS and DNS failures, timeouts it had its full budget for); per-tenant isolation comes from rate limits. Fallback behaviour is planned.
 - **Rationale**: OAGW is a critical path component — if it's down, no outbound API calls succeed.
 - **Architecture Allocation**: See DESIGN.md § NFR Allocation for how this is realized
 
@@ -776,7 +782,7 @@ None. All project-default NFRs apply to this gear.
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Upstream service outage cascading to OAGW callers | High — all consumers of that upstream blocked | Circuit breaker pattern; configurable timeout and fallback behavior |
+| Upstream service outage cascading to OAGW callers | High — all consumers of that upstream blocked | Per-upstream circuit breaker with configurable thresholds and timeout (fail fast with `503` + `Retry-After`); fallback behavior planned |
 | Credential store unavailability | High — proxy requests fail if credentials cannot be retrieved | Cache last-known-good credentials with short TTL; alert on cred_store health |
 | Rate limit state loss on restart | Medium — brief window of unlimited requests | Persist rate limit counters; accept brief burst on cold start |
 | Configuration loss on restart without a database | Medium — upstreams and routes created through the Management API disappear | Configure a database for production deployments; log a warning at startup when running with in-memory storage |

@@ -21,8 +21,8 @@ pub mod models;
 pub const SECRET_REF_HEADER: &str = "x-oagw-secret-ref";
 
 pub use models::{
-    AuthConfig, BudgetConfig, BudgetMode, BurstConfig, CorsConfig, CorsHttpMethod,
-    CreateRouteRequest, CreateRouteRequestBuilder, CreateUpstreamRequest,
+    AuthConfig, BudgetConfig, BudgetMode, BurstConfig, CircuitBreakerConfig, CorsConfig,
+    CorsHttpMethod, CreateRouteRequest, CreateRouteRequestBuilder, CreateUpstreamRequest,
     CreateUpstreamRequestBuilder, Endpoint, GrpcMatch, HeadersConfig, HttpMatch, HttpMethod,
     ListQuery, MatchRules, PassthroughMode, PathSuffixMode, PluginBinding, PluginsConfig,
     RateLimitAlgorithm, RateLimitConfig, RateLimitScope, RateLimitStrategy, RequestHeaderRules,
@@ -34,10 +34,11 @@ pub use models::{
 pub use api::ServiceGatewayClientV1;
 pub use body::Body;
 pub use codec::Json;
-pub use error::{ServiceGatewayError, StreamClosedByGateway, StreamingError};
+pub use error::{ServiceGatewayError, StreamClosedByGateway, StreamIdleTimeout, StreamingError};
 pub use gts::{
-    APIKEY_AUTH_PLUGIN_ID, AUTH_PLUGIN_SCHEMA, GUARD_PLUGIN_SCHEMA, HTTP_PROTOCOL_ID,
-    PROTOCOL_SCHEMA, PROXY_SCHEMA, ROUTE_SCHEMA, TRANSFORM_PLUGIN_SCHEMA, UPSTREAM_SCHEMA,
+    APIKEY_AUTH_PLUGIN_ID, AUTH_PLUGIN_SCHEMA, AWS_SIGV4_AUTH_PLUGIN_ID, GUARD_PLUGIN_SCHEMA,
+    HTTP_PROTOCOL_ID, PROTOCOL_SCHEMA, PROXY_SCHEMA, ROUTE_SCHEMA, TRANSFORM_PLUGIN_SCHEMA,
+    UPSTREAM_SCHEMA,
 };
 pub use multipart::{MultipartBody, MultipartError, Part};
 pub use sse::{FromServerEvent, ServerEvent, ServerEventsResponse, ServerEventsStream};

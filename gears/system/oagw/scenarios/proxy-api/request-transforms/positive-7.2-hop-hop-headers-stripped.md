@@ -1,37 +1,47 @@
 # Hop-by-hop headers are stripped
 
+## Setup
+
+Create an upstream with `"headers": {"request": {"passthrough": "all"}}` and a route `POST /echo`. Under `passthrough: all` every other client header reaches the upstream, so a missing header shows that it was stripped.
+
 ## Inbound request
 
+A plain request, not a WebSocket handshake: `Upgrade: websocket` with `Connection: Upgrade` would make it one, and the gateway would answer it as a handshake instead.
+
 ```http
-GET /api/oagw/v1/proxy/httpbin.org/get HTTP/1.1
+POST /api/oagw/v1/proxy/<alias>/echo HTTP/1.1
 Host: oagw.example.com
 Authorization: Bearer <tenant-token>
-Connection: keep-alive, Upgrade
-Upgrade: websocket
-TE: trailers
-Transfer-Encoding: chunked
+Content-Type: application/json
+Connection: keep-alive, upgrade, x-conn-nominated
+Upgrade: h2c
+X-Conn-Nominated: x
 Keep-Alive: timeout=5
+TE: trailers
 Trailer: X-Checksum
 Proxy-Authorization: Basic <credentials>
+X-E2E-Control: arrives
 
+{"test": true}
 ```
 
 ## Expected behavior
 
-- Gateway strips hop-by-hop headers when building outbound request:
-  - `Connection`
+- `200` from the upstream.
+- The upstream receives `X-E2E-Control: arrives` and none of:
+  - `Connection` as the client sent it (the engine may set its own)
   - `Upgrade`
   - `TE`
-  - `Transfer-Encoding`
   - `Keep-Alive`
   - `Trailer`
   - `Proxy-Authorization`
+  - `X-Conn-Nominated`, which is hop-by-hop because `Connection` names it
+- `Transfer-Encoding` is stripped too and the engine frames the body itself (Rust test: an e2e client sets its own framing).
 - Outbound request uses correct upstream scheme and does not attempt protocol upgrades.
 
 ## What to check
 
 - Upstream echo endpoint does not receive the stripped headers.
-- Response is successful (or a gateway validation error if request is malformed; lock expected behavior).
 - The same names are stripped when an upstream header rule or a transform plugin sets them.
 - Every `Connection` field line counts: a header nominated on a second `Connection` line is stripped too.
 - Under `"passthrough": "allowlist"`, a header the allowlist names is still stripped when the client nominates it in `Connection`, even if the allowlist does not name `Connection` itself. A WebSocket upgrade keeps `Upgrade`.
@@ -84,4 +94,4 @@ X-Multi: b
 - It receives one `Authorization` line, the injected `Bearer <secret>`; the client's line is replaced.
 - A non-UTF-8 header value passes through unchanged too (Rust test; the e2e client sends text headers).
 - With the transform bound, the same holds, and the upstream also receives one generated `X-Request-ID`. A transform rewrites only the headers it changes: the credential keeps its exact bytes (an obs-text secret such as `sk-café` included) and stays marked sensitive, and repeated and non-UTF-8 lines it does not touch pass unchanged. The same holds for response headers (Rust tests).
-- If the auth plugin produces a header name or value that is not valid, the request fails with `400` (invalid plugin config) instead of being sent without credentials.
+- If the auth plugin produces a header name or value that is not valid, the request fails with `500` (plugin misconfiguration) instead of being sent without credentials.

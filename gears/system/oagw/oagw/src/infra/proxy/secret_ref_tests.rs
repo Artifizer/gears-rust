@@ -18,12 +18,13 @@ use credstore_sdk::{
 use http::{Method, StatusCode};
 use oagw_sdk::reason::permission::DenialReason;
 use oagw_sdk::{
-    AuthConfig, Body, BurstConfig, CorsConfig, CorsHttpMethod, CreateRouteRequest,
-    CreateUpstreamRequest, CreateUpstreamRequestBuilder, Endpoint, HTTP_PROTOCOL_ID, HeadersConfig,
-    HttpMatch, HttpMethod, MatchRules, PassthroughMode, PathSuffixMode, PluginBinding,
-    PluginsConfig, RateLimitAlgorithm, RateLimitConfig, RateLimitScope, RateLimitStrategy,
-    RequestHeaderRules, SECRET_REF_HEADER, Scheme, Server, ServiceGatewayError, SharingMode,
-    SustainedRate, UpdateUpstreamRequest, Window, field::SecretRefCode,
+    AuthConfig, Body, BurstConfig, CircuitBreakerConfig, CorsConfig, CorsHttpMethod,
+    CreateRouteRequest, CreateUpstreamRequest, CreateUpstreamRequestBuilder, Endpoint,
+    HTTP_PROTOCOL_ID, HeadersConfig, HttpMatch, HttpMethod, MatchRules, PassthroughMode,
+    PathSuffixMode, PluginBinding, PluginsConfig, RateLimitAlgorithm, RateLimitConfig,
+    RateLimitScope, RateLimitStrategy, RequestHeaderRules, SECRET_REF_HEADER, Scheme, Server,
+    ServiceGatewayError, SharingMode, SustainedRate, UpdateUpstreamRequest, Window,
+    field::SecretRefCode,
 };
 use serde_json::Value;
 use tenant_resolver_sdk::TenantId;
@@ -38,7 +39,9 @@ use crate::domain::gts_helpers::{
 };
 use crate::domain::plugin::{PluginError, TransformPlugin, TransformRequestContext};
 use crate::domain::ports::OagwMetricsPort;
-use crate::domain::ports::metric_labels::{CacheEviction, CacheLookup, CacheMap, CacheStale};
+use crate::domain::ports::metric_labels::{
+    CacheEviction, CacheLookup, CacheMap, CacheStale, RateLimitBucket, StreamOutcome,
+};
 use crate::domain::test_support::{DenyingAuthZResolverClient, MockTenantResolverClient};
 use crate::test_support::{
     APIKEY_AUTH_PLUGIN_ID, AppHarness, AppHarnessBuilder, MockBody, MockGuard, MockResponse,
@@ -1019,6 +1022,7 @@ async fn hier_004_mode_switch_needs_override_auth() {
         headers: None,
         plugins: None,
         rate_limit: None,
+        circuit_breaker: None,
         cors: None,
         tags: vec![],
         enabled: true,
@@ -2177,8 +2181,8 @@ async fn err_003_exhausted_limit_no_read() {
 }
 
 /// SREF-ERR-004: a CredStore outage or timeout returns 503 service
-/// unavailable, with no reason code, and keeps the limit debits already
-/// taken.
+/// unavailable with reason `CREDENTIAL_STORE_UNAVAILABLE`, and keeps the
+/// limit debits already taken.
 #[tokio::test]
 async fn err_004_outage_and_timeout_are_503_and_keep_debit() {
     for store in [
@@ -2190,7 +2194,11 @@ async fn err_004_outage_and_timeout_are_503_and_keep_debit() {
         assert_eq!(err.status_code(), 503);
         let p = problem_of(&err);
         assert!(p["type"].as_str().unwrap().contains("service_unavailable"));
-        assert!(p["context"].get("reason").is_none(), "{p}");
+        assert_eq!(
+            p["context"]["reason"],
+            oagw_sdk::reason::unavailable::CREDENTIAL_STORE_UNAVAILABLE,
+            "{p}"
+        );
         // The debit stays: the next request is over the limit, and is
         // refused before any CredStore read.
         let err = fx.sdk(fx.t.tenant, fx.post(&["k"])).await.unwrap_err();
@@ -2337,6 +2345,114 @@ async fn err_004_read_shares_the_request_deadline() {
     assert!(elapsed < bound, "{elapsed:?} >= {bound:?}");
 }
 
+/// A circuit breaker that opens on the first failure and stays open a
+/// minute.
+fn open_on_first_failure() -> CircuitBreakerConfig {
+    CircuitBreakerConfig {
+        failure_threshold: 1,
+        timeout_seconds: 60,
+        ..CircuitBreakerConfig::default()
+    }
+}
+
+/// A provider that holds its answer to `POST /v1/chat` until the sender is
+/// dropped, for the next request.
+fn hold_chat(fx: &mut Fx) -> tokio::sync::oneshot::Sender<()> {
+    fx.guard.mock_gated(
+        "POST",
+        CHAT,
+        MockResponse {
+            status: 200,
+            headers: vec![],
+            body: MockBody::Json(serde_json::json!({})),
+        },
+    )
+}
+
+/// A deadline hit after the CredStore read used up most of the shared
+/// request timeout is the read's doing, not the upstream's: the circuit
+/// stays closed.
+#[tokio::test]
+async fn circuit_breaker_ignores_a_deadline_the_credstore_read_used_up() {
+    const READ: Duration = Duration::from_millis(600);
+    const TIMEOUT: Duration = Duration::from_millis(1000);
+    let mut fx = Fx::build(CredStoreSpy::empty().answering_after(READ), |b| {
+        b.with_request_timeout(TIMEOUT)
+    })
+    .await;
+    fx.secret("k", "sk-k", fx.t.tenant, &[fx.t.tenant]);
+    fx.upstream_with(
+        fx.t.tenant,
+        fx.builder(Some(request_ref(SharingMode::Private, None, None)))
+            .circuit_breaker(open_on_first_failure()),
+    )
+    .await;
+    for i in 0..2 {
+        let _hold = hold_chat(&mut fx);
+        let err = fx.sdk(fx.t.tenant, fx.post(&["k"])).await.unwrap_err();
+        assert_eq!(err.status_code(), 504, "request {i}");
+    }
+    assert_eq!(fx.recorded().await.len(), 2, "both reached the provider");
+}
+
+/// A deadline hit with the whole request timeout left for the exchange is
+/// the upstream's: the next request fails fast.
+#[tokio::test]
+async fn circuit_breaker_counts_a_deadline_with_the_full_budget() {
+    let mut fx = Fx::build(CredStoreSpy::empty(), |b| {
+        b.with_request_timeout(Duration::from_millis(300))
+    })
+    .await;
+    fx.upstream_with(
+        fx.t.tenant,
+        fx.builder(None).circuit_breaker(open_on_first_failure()),
+    )
+    .await;
+    let _hold = hold_chat(&mut fx);
+    let err = fx.sdk(fx.t.tenant, fx.post(&[])).await.unwrap_err();
+    assert_eq!(err.status_code(), 504);
+    let o = fx.sdk_outcome(fx.t.tenant, fx.post(&[])).await;
+    assert_eq!(o.status, 503);
+    assert_eq!(fx.recorded().await.len(), 1, "the second failed fast");
+}
+
+/// An open circuit rejects a `request_ref` request before its CredStore
+/// read.
+#[tokio::test]
+async fn open_circuit_reads_no_secret() {
+    let mut fx = Fx::new().await;
+    fx.secret("k", "sk-k", fx.t.tenant, &[fx.t.tenant]);
+    fx.guard.mock(
+        "POST",
+        CHAT,
+        MockResponse {
+            status: 503,
+            headers: vec![],
+            body: MockBody::Json(serde_json::json!({})),
+        },
+    );
+    fx.upstream_with(
+        fx.t.tenant,
+        fx.builder(Some(request_ref(SharingMode::Private, None, None)))
+            .circuit_breaker(open_on_first_failure()),
+    )
+    .await;
+    assert_eq!(
+        fx.sdk_outcome(fx.t.tenant, fx.post(&["k"])).await.status,
+        503
+    );
+    assert_eq!(fx.gets(), ["k"]);
+    for _ in 0..3 {
+        let err = fx.sdk(fx.t.tenant, fx.post(&["k"])).await.unwrap_err();
+        assert!(
+            matches!(err, CanonicalError::ServiceUnavailable { ref ctx, .. }
+                if ctx.retry_after_seconds == Some(60)),
+            "{err:?}"
+        );
+    }
+    assert_eq!(fx.gets(), ["k"], "no read while open");
+}
+
 /// Failures the error table does not list keep the API-key plugin's mapping
 /// in `request_ref` mode (ADR-0022, "Errors and observability"): a secret
 /// value that is not UTF-8 or not a valid header value returns 401
@@ -2464,7 +2580,7 @@ fn unavailable() -> Outcome {
     Outcome {
         status: 503,
         category: "gts://gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~".into(),
-        reason: String::new(),
+        reason: oagw_sdk::reason::unavailable::CREDENTIAL_STORE_UNAVAILABLE.into(),
         field: String::new(),
     }
 }
@@ -2947,11 +3063,12 @@ impl OagwMetricsPort for LabelRecorder {
     fn record_request_duration_seconds(&self, _: &str, _: &str, _: &str, _: f64) {}
     fn increment_in_flight(&self, _: &str) {}
     fn decrement_in_flight(&self, _: &str) {}
-    fn record_rate_limit_exceeded(&self, _: &str, _: &str) {}
-    fn record_rate_limit_usage_ratio(&self, _: &str, _: &str, _: f64) {}
+    fn record_stream_duration_seconds(&self, _: &str, _: &str, _: StreamOutcome, _: f64) {}
+    fn record_rate_limit_exceeded(&self, _: &str, _: &str, _: RateLimitBucket) {}
+    fn record_rate_limit_usage_ratio(&self, _: &str, _: &str, _: RateLimitBucket, _: f64) {}
     fn increment_active_websocket_sessions(&self, _: &str) {}
     fn decrement_active_websocket_sessions(&self, _: &str) {}
-    fn record_websocket_session_duration_seconds(&self, _: &str, _: f64) {}
+    fn record_websocket_session_duration_seconds(&self, _: &str, _: StreamOutcome, _: f64) {}
     fn record_rate_limit_sweep(&self, _: u64, _: u64) {}
     fn record_registry_provisioning_failure(&self, _: &str, _: &str) {}
     fn record_registry_provisioning_run(&self, _: &str) {}
@@ -3362,12 +3479,15 @@ async fn obs_003_credential_mode_label() {
         .iter()
         .map(|r| (r[0].as_str(), r.last().unwrap().as_str()))
         .collect();
+    // A gateway error counts in both the request and the error counter.
     assert_eq!(
         modes,
         [
             ("request", "request_ref"),
+            ("request", "request_ref"),
             ("error", "request_ref"),
             ("request", "config"),
+            ("request", "unknown"),
             ("error", "unknown"),
         ]
     );

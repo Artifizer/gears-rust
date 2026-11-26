@@ -374,6 +374,41 @@ pub enum RateLimitStrategy {
 }
 
 // ---------------------------------------------------------------------------
+// CircuitBreakerConfig
+// ---------------------------------------------------------------------------
+
+/// Circuit breaker of an upstream (`cpt-cf-oagw-adr-circuit-breaker`). Each
+/// replica keeps its own breaker state.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircuitBreakerConfig {
+    /// How the configuration is shared with descendant tenants.
+    pub sharing: SharingMode,
+    /// Whether requests go through the breaker.
+    pub enabled: bool,
+    /// Consecutive failures that open the circuit.
+    pub failure_threshold: u32,
+    /// Seconds the circuit stays open before probes go through.
+    pub timeout_seconds: u32,
+    /// Probes let through at once after the timeout; all must succeed to
+    /// close the circuit.
+    pub success_threshold: u32,
+    /// The upstream whose level set the effective config. Set by the
+    /// hierarchical merge and never stored; tenants that resolve different
+    /// configs on one upstream get separate breakers.
+    pub owner_id: Option<Uuid>,
+}
+
+impl CircuitBreakerConfig {
+    /// Largest `failure_threshold`.
+    pub const MAX_FAILURE_THRESHOLD: u32 = 1_000;
+    /// Largest `success_threshold`, which is also the number of concurrent
+    /// half-open probes. `timeout_seconds` is capped by
+    /// [`MAX_PROXY_TIMEOUT_SECS`](crate::config::MAX_PROXY_TIMEOUT_SECS).
+    pub const MAX_SUCCESS_THRESHOLD: u32 = 100;
+}
+
+// ---------------------------------------------------------------------------
 // CorsConfig
 // ---------------------------------------------------------------------------
 
@@ -444,7 +479,8 @@ pub struct PluginsConfig {
 // ---------------------------------------------------------------------------
 
 /// HTTP methods a route can match. Declaration order is the canonical order
-/// in which stored routes return their methods.
+/// in which stored routes return their methods. A route matches only the
+/// methods it lists: `GET` does not imply `HEAD`.
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HttpMethod {
@@ -458,6 +494,10 @@ pub enum HttpMethod {
     Delete,
     /// `PATCH`.
     Patch,
+    /// `HEAD`.
+    Head,
+    /// `OPTIONS`.
+    Options,
 }
 
 /// How the path suffix of the proxy URL is handled.
@@ -572,6 +612,8 @@ pub struct Upstream {
     pub plugins: Option<PluginsConfig>,
     /// Upstream-level rate limit.
     pub rate_limit: Option<RateLimitConfig>,
+    /// Upstream circuit breaker.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     /// Upstream-level CORS configuration.
     pub cors: Option<CorsConfig>,
     /// Free-form tags.
@@ -668,6 +710,8 @@ pub struct CreateUpstreamRequest {
     pub plugins: Option<PluginsConfig>,
     /// Upstream-level rate limit.
     pub rate_limit: Option<RateLimitConfig>,
+    /// Upstream circuit breaker.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     /// Upstream-level CORS configuration.
     pub cors: Option<CorsConfig>,
     /// Free-form tags.
@@ -694,6 +738,8 @@ pub struct UpdateUpstreamRequest {
     pub plugins: Option<PluginsConfig>,
     /// Upstream-level rate limit.
     pub rate_limit: Option<RateLimitConfig>,
+    /// Upstream circuit breaker.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
     /// Upstream-level CORS configuration.
     pub cors: Option<CorsConfig>,
     /// Free-form tags.

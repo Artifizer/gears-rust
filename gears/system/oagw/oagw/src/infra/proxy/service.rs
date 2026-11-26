@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -10,45 +11,51 @@ use http::{HeaderMap, HeaderValue};
 use oagw_sdk::body::{Body, BodyStream};
 use oagw_sdk::{field, reason};
 use tokio_util::sync::CancellationToken;
+use toolkit_http_proxy::sanitize::{self, RequestKind};
 use toolkit_http_proxy::{ReplayableBody, UpgradeOutcome, empty_body, full_body, stream_body};
 use toolkit_security::SecurityContext;
 
 use crate::config::TokenCacheConfig;
-use crate::domain::error::DomainError;
+use crate::domain::circuit_breaker::{CircuitBreakers, UpstreamPermit};
+use crate::domain::error::{Dispatch, DomainError};
 use crate::domain::model::{
-    PassthroughMode, PathSuffixMode, ProxyTarget, RateLimitConfig, ResponseHeaderRules,
+    HttpMethod, PassthroughMode, PathSuffixMode, ProxyTarget, RateLimitConfig, ResponseHeaderRules,
     ShadowedRouteLimit, Upstream,
 };
 use crate::domain::plugin::credentials::CredentialMode;
 use crate::domain::plugin::{
-    AuthContext, GuardContext, GuardDecision, PluginError, TransformErrorContext,
-    TransformRequestContext, TransformResponseContext,
+    AuthContext, AuthPlugin, GuardContext, GuardDecision, PluginError, SigningBody,
+    TransformErrorContext, TransformRequestContext, TransformResponseContext,
 };
 use crate::domain::ports::OagwMetricsPort;
-use crate::domain::ports::metric_labels::{self, phase};
-use crate::domain::proxy_path::canonical_path;
+use crate::domain::ports::metric_labels::{self, RateLimitBucket, StreamOutcome, phase};
+use crate::domain::proxy_path::{PathRewrite, canonical_path, path_rewrite};
 use crate::domain::rate_limit::{
     RateLimitKeyContext, RateLimitOutcome, RateLimitResource, RateLimiter, build_pool_key,
     build_rate_limit_key, pool_config,
 };
 use crate::domain::repo::Tags;
-use crate::domain::route_matching::path_after_route_prefix;
+use crate::domain::route_matching::{parse_method, path_after_route_prefix};
 use crate::domain::services::management::forbid_http_endpoints;
 use crate::domain::services::{
     ControlPlaneService, DataPlaneService, EndpointSelector, ProxyGrant, SelectedEndpoint,
 };
 use crate::infra::plugin::{AuthPluginRegistry, GuardPluginRegistry, TransformPluginRegistry};
 
-use super::engine::{ProxyEngine, into_body_stream, map_proxy_error};
+use super::engine::{
+    ProxyEngine, TargetError, into_body_stream, is_connect_failure, map_proxy_error,
+};
 use super::headers;
 use super::streaming::StreamShutdown;
-use super::{request_builder, secret_ref, streaming};
+use super::{request_builder, secret_ref, signing, streaming};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default maximum request body size: 100 MB.
 const MAX_BODY_SIZE: usize = 100 * 1024 * 1024;
-/// How often idle rate-limit buckets are evicted.
-const RATE_LIMIT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// Picks one endpoint of the upstream's (`custom-header-routing`).
+const TARGET_HOST_HEADER: &str = "x-oagw-target-host";
+/// How often idle rate-limit buckets and circuit breakers are evicted.
+const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Data Plane service implementation: proxy orchestration and plugin execution.
 pub struct DataPlaneServiceImpl {
@@ -64,6 +71,9 @@ pub struct DataPlaneServiceImpl {
     guard_registry: GuardPluginRegistry,
     transform_registry: TransformPluginRegistry,
     rate_limiter: Arc<RateLimiter>,
+    /// Shared with the Control Plane, which drops a deleted upstream's
+    /// breakers.
+    circuit_breakers: Arc<CircuitBreakers>,
     request_timeout: Duration,
     /// Enforces authorization policy before proxying each request.
     policy_enforcer: PolicyEnforcer,
@@ -94,6 +104,7 @@ impl DataPlaneServiceImpl {
         engine: Arc<ProxyEngine>,
         metrics: Arc<dyn OagwMetricsPort>,
         rate_limiter: Arc<RateLimiter>,
+        circuit_breakers: Arc<CircuitBreakers>,
     ) -> Self {
         let auth_registry = AuthPluginRegistry::with_builtins(
             Arc::clone(&credstore),
@@ -113,6 +124,7 @@ impl DataPlaneServiceImpl {
             guard_registry,
             transform_registry,
             rate_limiter,
+            circuit_breakers,
             request_timeout: REQUEST_TIMEOUT,
             policy_enforcer,
             allow_http_upstream: false,
@@ -124,14 +136,15 @@ impl DataPlaneServiceImpl {
         }
     }
 
-    /// Start evicting idle rate-limit buckets every
-    /// [`RATE_LIMIT_SWEEP_INTERVAL`]. The task ends when `cancel` fires or
-    /// the limiter, shared with the Control Plane, is dropped.
-    pub fn spawn_rate_limit_sweeper(&self, cancel: CancellationToken) {
-        tokio::spawn(sweep_rate_limits(
+    /// Start evicting idle rate-limit buckets and circuit breakers every
+    /// [`IDLE_SWEEP_INTERVAL`]. The task ends when `cancel` fires or the
+    /// limiter, shared with the Control Plane, is dropped.
+    pub fn spawn_idle_sweeper(&self, cancel: CancellationToken) {
+        tokio::spawn(sweep_idle_state(
             Arc::downgrade(&self.rate_limiter),
+            Arc::downgrade(&self.circuit_breakers),
             Arc::clone(&self.metrics),
-            RATE_LIMIT_SWEEP_INTERVAL,
+            IDLE_SWEEP_INTERVAL,
             cancel,
         ));
     }
@@ -190,6 +203,15 @@ impl DataPlaneServiceImpl {
     #[must_use]
     pub fn with_streaming_idle_timeout(mut self, timeout: Duration) -> Self {
         self.streaming_idle_timeout = timeout;
+        self
+    }
+
+    /// Register an auth plugin under `plugin_id`, replacing a built-in of
+    /// that id, for pipeline tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub(crate) fn with_auth_plugin(mut self, plugin_id: &str, plugin: Arc<dyn AuthPlugin>) -> Self {
+        self.auth_registry.insert(plugin_id, plugin);
         self
     }
 
@@ -293,13 +315,22 @@ impl DataPlaneServiceImpl {
         self.apply_response_pipeline(pipeline, status, &mut resp_headers)
             .await;
 
-        // Apply streaming lifecycle management for SSE responses:
-        // idle timeout and graceful shutdown awareness.
+        let labels = streaming::StreamLabels {
+            alias: pipeline.host.to_owned(),
+            path: pipeline.path_suffix.to_owned(),
+        };
+        // Inside the SSE lifecycle, so the idle and shutdown cuts it adds are
+        // not logged as upstream failures.
+        let resp_body_stream = streaming::log_upstream_body_error(resp_body_stream, labels.clone());
+        // SSE bodies get the streaming idle timeout and end on shutdown. Other
+        // bodies keep the engine's read timeout and finish within the HTTP
+        // drain.
         let resp_body_stream = if is_sse {
             streaming::streaming_body_with_lifecycle(
                 resp_body_stream,
                 self.streaming_idle_timeout,
                 self.stream_shutdown.subscribe(),
+                labels,
             )
         } else {
             resp_body_stream
@@ -323,12 +354,13 @@ impl DataPlaneServiceImpl {
             return Err(DomainError::DownstreamError {
                 detail: "upstream has no endpoints".into(),
                 instance: instance_uri.to_string(),
+                dispatch: Dispatch::NotSent,
             });
         }
 
         // Tier 1: Explicit selection via X-OAGW-Target-Host header.
         if let Some(target_host) = req_headers
-            .get("x-oagw-target-host")
+            .get(TARGET_HOST_HEADER)
             .and_then(|v| v.to_str().ok())
         {
             // Validate format: allowlist of safe hostname/IP characters.
@@ -389,6 +421,7 @@ impl DataPlaneServiceImpl {
             .map_err(|e| DomainError::DownstreamError {
                 detail: e.to_string(),
                 instance: instance_uri.to_string(),
+                dispatch: Dispatch::NotSent,
             })
     }
 }
@@ -398,7 +431,9 @@ struct ParsedRequest {
     instance_uri: String,
     alias: String,
     path_suffix: String,
-    query_params: Vec<(String, String)>,
+    /// What normalizing the client's path suffix removed.
+    path_rewrite: PathRewrite,
+    query: RequestQuery,
     method: http::Method,
     req_headers: HeaderMap,
     is_upgrade: bool,
@@ -407,6 +442,81 @@ struct ParsedRequest {
     /// Client address from the API gateway's `ClientIp` extension; `None`
     /// for requests that did not come through it (in-process SDK calls).
     client_ip: Option<std::net::IpAddr>,
+}
+
+/// The query of a proxied request.
+///
+/// The upstream gets `raw`, the client's bytes, unless a transform changed
+/// `params` or `reencode` is set: decoding and re-encoding would rewrite
+/// `%2B` vs `+`, `%20` vs `+`, reserved characters left unescaped and `k`
+/// vs `k=`, which signed URLs and some APIs depend on.
+struct RequestQuery {
+    /// After the `?`, as the client sent it; `None` without a `?`.
+    raw: Option<String>,
+    /// `raw` decoded as `application/x-www-form-urlencoded`, in order,
+    /// repeated keys kept: what the allowlist checks and transforms see.
+    params: Vec<(String, String)>,
+    /// Send `params` form-encoded instead of `raw`: the allowlist admitted a
+    /// query with a literal `;`. The allowlist splits on `&` only, so
+    /// `model=x;admin=1` is the one parameter `model`, but Rack 2, older
+    /// Python `parse_qs` and older Go `net/url` also split on `;` and would
+    /// read an `admin` the allowlist never checked. Encoded, the `;` is
+    /// `%3B` and every reader sees the parameters the gateway checked.
+    reencode: bool,
+}
+
+impl RequestQuery {
+    fn parse(raw: Option<&str>) -> Self {
+        let params = raw
+            .map(|q| {
+                form_urlencoded::parse(q.as_bytes())
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            raw: raw.map(str::to_owned),
+            params,
+            reencode: false,
+        }
+    }
+
+    /// Called once the allowlist admitted `params`.
+    fn allowlist_admitted(&mut self) {
+        self.reencode = self.raw.as_deref().is_some_and(|q| q.contains(';'));
+    }
+
+    /// The query to send upstream. `params` is form-encoded only when a
+    /// transform changed it or `reencode` is set; an empty list then means
+    /// no query.
+    fn outbound(self, transformed: bool) -> Option<String> {
+        if !transformed && !self.reencode {
+            return self.raw;
+        }
+        if self.params.is_empty() {
+            return None;
+        }
+        Some(
+            form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(&self.params)
+                .finish(),
+        )
+    }
+}
+
+/// The standard method a route matched `method` as (routing ignores case),
+/// or `method` itself when it names none.
+fn routed_method(method: http::Method) -> http::Method {
+    match parse_method(method.as_str()) {
+        Some(HttpMethod::Get) => http::Method::GET,
+        Some(HttpMethod::Post) => http::Method::POST,
+        Some(HttpMethod::Put) => http::Method::PUT,
+        Some(HttpMethod::Delete) => http::Method::DELETE,
+        Some(HttpMethod::Patch) => http::Method::PATCH,
+        Some(HttpMethod::Head) => http::Method::HEAD,
+        Some(HttpMethod::Options) => http::Method::OPTIONS,
+        None => method,
+    }
 }
 
 /// Decompose and validate an inbound proxy request.
@@ -423,7 +533,7 @@ fn parse_proxy_request(
     // Extract alias from the raw path first, then normalize only the
     // suffix. This prevents path traversal (e.g. `/../../admin/...`)
     // from influencing alias extraction.
-    let (alias, path_suffix) = {
+    let (alias, path_suffix, path_rewrite) = {
         let path = req.uri().path();
         let trimmed = path.strip_prefix('/').unwrap_or(path);
         let (alias, raw_suffix) = match trimmed.find('/') {
@@ -433,19 +543,11 @@ fn parse_proxy_request(
         (
             alias.to_string(),
             canonical_path(raw_suffix, &instance_uri)?,
+            path_rewrite(raw_suffix),
         )
     };
 
-    // Parse query parameters with proper URL decoding.
-    let query_params: Vec<(String, String)> = req
-        .uri()
-        .query()
-        .map(|q| {
-            form_urlencoded::parse(q.as_bytes())
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let query = RequestQuery::parse(req.uri().query());
 
     // Decompose request into parts. Keep body as-is for conditional handling.
     let (parts, body) = req.into_parts();
@@ -487,7 +589,8 @@ fn parse_proxy_request(
         instance_uri,
         alias,
         path_suffix,
-        query_params,
+        path_rewrite,
+        query,
         method,
         req_headers,
         is_upgrade,
@@ -497,65 +600,87 @@ fn parse_proxy_request(
     })
 }
 
-/// Metric label of a request whose future was dropped before it finished.
-const CANCELLED: &str = "Cancelled";
-
 /// Where a `proxy:invoke` check stands, for [`AuthorizeMetricsGuard`].
 enum AuthorizeOutcome {
     /// Not answered yet: a drop now is a cancellation.
     Pending,
     /// Granted: the proxied request is counted by [`RequestMetricsGuard`].
     Granted,
-    /// Refused or failed, under this error label.
-    Failed(&'static str),
+    /// Refused or failed, under this error label and response status.
+    Failed { variant: &'static str, status: u16 },
 }
 
 /// Counts a `proxy:invoke` check that does not lead to a proxied request:
-/// a denial or failure, or a check whose future was dropped. A granted check
+/// a denial or failure, a check whose future was dropped, or a granted
+/// request the REST handler rejected before proxying it. A granted check
 /// records nothing here.
 struct AuthorizeMetricsGuard {
     metrics: Arc<dyn OagwMetricsPort>,
     start: Instant,
+    method: &'static str,
     outcome: AuthorizeOutcome,
 }
 
 impl AuthorizeMetricsGuard {
-    fn new(metrics: Arc<dyn OagwMetricsPort>) -> Self {
+    fn new(metrics: Arc<dyn OagwMetricsPort>, method: &'static str) -> Self {
         Self {
             metrics,
             start: Instant::now(),
+            method,
             outcome: AuthorizeOutcome::Pending,
         }
+    }
+
+    /// Count a request granted `authorized_in` ago and rejected before it
+    /// was proxied. It is timed as a proxied request is: the check, not the
+    /// client's upload.
+    fn record_rejected(
+        metrics: Arc<dyn OagwMetricsPort>,
+        method: &'static str,
+        authorized_in: Duration,
+        err: &DomainError,
+    ) {
+        let now = Instant::now();
+        let mut guard = Self {
+            metrics,
+            start: now.checked_sub(authorized_in).unwrap_or(now),
+            method,
+            outcome: AuthorizeOutcome::Pending,
+        };
+        guard.failed(err);
     }
 
     fn granted(&mut self) {
         self.outcome = AuthorizeOutcome::Granted;
     }
 
-    fn failed(&mut self, variant: &'static str) {
-        self.outcome = AuthorizeOutcome::Failed(variant);
+    fn failed(&mut self, err: &DomainError) {
+        self.outcome = AuthorizeOutcome::Failed {
+            variant: domain_error_type_name(err),
+            status: domain_error_status(err),
+        };
     }
 }
 
 impl Drop for AuthorizeMetricsGuard {
     fn drop(&mut self) {
-        let variant = match self.outcome {
+        let (variant, status) = match self.outcome {
             AuthorizeOutcome::Granted => return,
-            AuthorizeOutcome::Pending => CANCELLED,
-            AuthorizeOutcome::Failed(variant) => variant,
+            AuthorizeOutcome::Pending => (metric_labels::CANCELLED, None),
+            AuthorizeOutcome::Failed { variant, status } => (variant, Some(status)),
         };
+        let unknown = metric_labels::UNKNOWN;
         self.metrics.record_request_duration_seconds(
-            metric_labels::UNKNOWN,
-            metric_labels::UNKNOWN,
+            unknown,
+            unknown,
             phase::TOTAL,
             self.start.elapsed().as_secs_f64(),
         );
-        self.metrics.record_error(
-            metric_labels::UNKNOWN,
-            metric_labels::UNKNOWN,
-            variant,
-            None,
-        );
+        if let Some(status) = status {
+            self.metrics
+                .record_request(unknown, unknown, self.method, status, None);
+        }
+        self.metrics.record_error(unknown, unknown, variant, None);
     }
 }
 
@@ -583,19 +708,44 @@ enum Authorization {
 enum RequestOutcome {
     Pending,
     Success(u16),
-    Error(&'static str),
+    /// A gateway error: its variant and the status the client gets.
+    Error {
+        variant: &'static str,
+        status: u16,
+    },
+}
+
+/// One request counted in `requests_in_flight` under `host`; dropping it
+/// takes the request out.
+struct InFlight {
+    metrics: Arc<dyn OagwMetricsPort>,
+    host: Cow<'static, str>,
+}
+
+impl InFlight {
+    fn start(metrics: Arc<dyn OagwMetricsPort>, host: Cow<'static, str>) -> Self {
+        metrics.increment_in_flight(&host);
+        Self { metrics, host }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.metrics.decrement_in_flight(&self.host);
+    }
 }
 
 /// RAII guard that owns the per-request metric bookkeeping for
 /// [`DataPlaneServiceImpl::proxy_request`].
 ///
-/// On construction it captures the start time. After upstream resolution,
-/// [`Self::mark_resolved`] sets the labels and increments the in-flight
-/// gauge. Before the request returns, the body calls
-/// [`Self::set_success`] or [`Self::set_error`] to record the terminal
-/// outcome. `Drop` then decrements the in-flight gauge (if it was ever
-/// incremented), records the duration histogram, and emits the success or
-/// error counter — even if the future is cancelled or panics.
+/// On construction it captures the start time and counts the request in
+/// flight under the unknown host; [`Self::mark_resolved`] sets the labels
+/// and moves it to the upstream's alias. Before the request returns, the
+/// body calls [`Self::set_success`] or [`Self::set_error`] to record the
+/// terminal outcome, and [`Self::observe_body`] hands the in-flight count
+/// to the response body. `Drop` records the duration to the response head
+/// and the request or error counter — even if the future is cancelled or
+/// panics — and ends the in-flight count unless the body took it.
 struct RequestMetricsGuard {
     metrics: Arc<dyn OagwMetricsPort>,
     start: Instant,
@@ -605,46 +755,132 @@ struct RequestMetricsGuard {
     /// `credential_mode` label: `None` (`unknown`) until the upstream
     /// resolves.
     credential_mode: Option<CredentialMode>,
-    in_flight: bool,
+    in_flight: Option<InFlight>,
     outcome: RequestOutcome,
 }
 
 impl RequestMetricsGuard {
     fn new(metrics: Arc<dyn OagwMetricsPort>, method: &'static str) -> Self {
         Self {
+            in_flight: Some(InFlight::start(
+                Arc::clone(&metrics),
+                Cow::Borrowed(metric_labels::UNKNOWN),
+            )),
             metrics,
             start: Instant::now(),
             method,
             host: metric_labels::UNKNOWN.to_owned(),
             path: metric_labels::UNKNOWN.to_owned(),
             credential_mode: None,
-            in_flight: false,
             outcome: RequestOutcome::Pending,
         }
     }
 
     fn mark_resolved(&mut self, host: String, path: String, credential_mode: CredentialMode) {
+        // Counted under the alias before the unknown entry goes, so the
+        // total never dips.
+        self.in_flight = Some(InFlight::start(
+            Arc::clone(&self.metrics),
+            Cow::Owned(host.clone()),
+        ));
         self.host = host;
         self.path = path;
         self.credential_mode = Some(credential_mode);
-        self.metrics.increment_in_flight(&self.host);
-        self.in_flight = true;
     }
 
     fn set_success(&mut self, status: u16) {
         self.outcome = RequestOutcome::Success(status);
     }
 
-    fn set_error(&mut self, variant: &'static str) {
-        self.outcome = RequestOutcome::Error(variant);
+    fn set_error(&mut self, err: &DomainError) {
+        self.outcome = RequestOutcome::Error {
+            variant: domain_error_type_name(err),
+            status: domain_error_status(err),
+        };
+    }
+
+    /// Keep the request in flight until the response body ends, and record
+    /// `stream_duration_seconds` then. A response without a body (101,
+    /// HEAD, 204, 304, `Content-Length: 0`) ends at its head and records no
+    /// stream duration.
+    fn observe_body(
+        &mut self,
+        resp: http::Response<Body>,
+        method: &http::Method,
+    ) -> http::Response<Body> {
+        let status = resp.status();
+        // The header the client gets: header rules and transforms run
+        // before this and may have changed or removed it.
+        let declared_len = declared_content_length(resp.headers());
+        let has_body = *method != http::Method::HEAD
+            && !status.is_informational()
+            && status != http::StatusCode::NO_CONTENT
+            && status != http::StatusCode::NOT_MODIFIED
+            && declared_len != Some(0);
+        let (parts, body) = resp.into_parts();
+        let body = match body {
+            Body::Stream(stream) if has_body => {
+                let end = StreamEnd {
+                    metrics: Arc::clone(&self.metrics),
+                    host: self.host.clone(),
+                    path: self.path.clone(),
+                    start: self.start,
+                };
+                let in_flight = self.in_flight.take();
+                Body::Stream(streaming::on_body_end(
+                    stream,
+                    declared_len,
+                    move |outcome| {
+                        end.record(outcome);
+                        drop(in_flight);
+                    },
+                ))
+            }
+            // hyper does not read the body of these (it would end as
+            // cancelled): the request ends at its head.
+            body @ Body::Stream(_) => body,
+            // A 101 carries no body; the session has its own metrics.
+            body @ Body::Empty => body,
+            // Built whole by the gateway, not relayed: nothing to wait for.
+            body @ Body::Bytes(_) => body,
+        };
+        http::Response::from_parts(parts, body)
+    }
+}
+
+/// The single `Content-Length` of a response, if it has one that parses.
+fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
+    let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.to_str().ok()?.trim().parse().ok()
+}
+
+/// Labels and start time for `stream_duration_seconds`.
+struct StreamEnd {
+    metrics: Arc<dyn OagwMetricsPort>,
+    host: String,
+    path: String,
+    start: Instant,
+}
+
+impl StreamEnd {
+    fn record(&self, outcome: StreamOutcome) {
+        self.metrics.record_stream_duration_seconds(
+            &self.host,
+            &self.path,
+            outcome,
+            self.start.elapsed().as_secs_f64(),
+        );
     }
 }
 
 impl Drop for RequestMetricsGuard {
     fn drop(&mut self) {
-        if self.in_flight {
-            self.metrics.decrement_in_flight(&self.host);
-        }
+        // A request without a body leaves the in-flight count first.
+        drop(self.in_flight.take());
         self.metrics.record_request_duration_seconds(
             &self.host,
             &self.path,
@@ -661,13 +897,24 @@ impl Drop for RequestMetricsGuard {
                     self.credential_mode,
                 );
             }
-            RequestOutcome::Error(variant) => {
+            RequestOutcome::Error { variant, status } => {
+                self.metrics.record_request(
+                    &self.host,
+                    &self.path,
+                    self.method,
+                    status,
+                    self.credential_mode,
+                );
                 self.metrics
                     .record_error(&self.host, &self.path, variant, self.credential_mode);
             }
             RequestOutcome::Pending => {
-                self.metrics
-                    .record_error(&self.host, &self.path, CANCELLED, self.credential_mode);
+                self.metrics.record_error(
+                    &self.host,
+                    &self.path,
+                    metric_labels::CANCELLED,
+                    self.credential_mode,
+                );
             }
         }
     }
@@ -683,20 +930,30 @@ impl DataPlaneService for DataPlaneServiceImpl {
         self.proxy(Authorization::Check(ctx), req).await
     }
 
-    async fn authorize_proxy(&self, ctx: SecurityContext) -> Result<ProxyGrant, DomainError> {
+    async fn authorize_proxy(
+        &self,
+        ctx: SecurityContext,
+        method: &http::Method,
+    ) -> Result<ProxyGrant, DomainError> {
         // cancel-safe: the guard records a denial or a cancellation (the
         // future dropped mid-check, e.g. by the gateway's request timeout)
-        // when it drops. A granted request is counted from the grant once it
-        // reaches `proxy_request_granted`; the REST handler's own rejections
-        // in between (body limit, body read) are not counted, as before
-        // (#4989 owns counting every request).
-        let mut guard = AuthorizeMetricsGuard::new(Arc::clone(&self.metrics));
+        // when it drops. A granted request is counted by
+        // `proxy_request_granted`, by `reject_granted` when the caller
+        // rejects it first, or by the grant itself when it is dropped.
+        let method = crate::infra::metrics::normalize_method(method);
+        let mut guard = AuthorizeMetricsGuard::new(Arc::clone(&self.metrics), method);
         let result = ProxyGrant::authorize(&self.policy_enforcer, ctx).await;
         match &result {
             Ok(_) => guard.granted(),
-            Err(e) => guard.failed(domain_error_type_name(e)),
+            Err(e) => guard.failed(e),
         }
-        result
+        result.map(|grant| grant.count_if_dropped(Arc::clone(&self.metrics), method))
+    }
+
+    fn reject_granted(&self, mut grant: ProxyGrant, err: &DomainError) {
+        if let Some((metrics, method)) = grant.take_count() {
+            AuthorizeMetricsGuard::record_rejected(metrics, method, grant.authorized_in(), err);
+        }
     }
 
     async fn proxy_request_granted(
@@ -713,12 +970,16 @@ impl DataPlaneServiceImpl {
     /// before the request is validated.
     async fn proxy(
         &self,
-        auth: Authorization,
+        mut auth: Authorization,
         req: http::Request<Body>,
     ) -> Result<http::Response<Body>, DomainError> {
-        let method = crate::infra::metrics::normalize_method(req.method());
+        // The client's method until a route matches, then the one it matched.
+        let mut routed = req.method().clone();
+        let method = crate::infra::metrics::normalize_method(&routed);
         let mut guard = RequestMetricsGuard::new(Arc::clone(&self.metrics), method);
-        if let Authorization::Granted(grant) = &auth {
+        if let Authorization::Granted(grant) = &mut auth {
+            // The guard counts the request from here on.
+            grant.take_count();
             // The REST path authorized before reading the body: count the
             // check, as the SDK path does, but not the client's upload.
             guard.start = guard
@@ -740,7 +1001,8 @@ impl DataPlaneServiceImpl {
                 instance_uri,
                 alias,
                 path_suffix,
-                mut query_params,
+                path_rewrite,
+                mut query,
                 method,
                 req_headers,
                 is_upgrade,
@@ -781,9 +1043,16 @@ impl DataPlaneServiceImpl {
                 }
             };
 
+            // Routing ignores the method's case; RFC 9110 methods do not. Sent
+            // as is, `head` reaches the upstream as an unknown method, and a
+            // HEAD answer read as one to such a method waits for a body that
+            // never comes. Every later step uses the method the route matched.
+            let method = routed_method(method);
+            guard.method = crate::infra::metrics::normalize_method(&method);
+            routed.clone_from(&method);
+
             // Capture metric labels now that upstream + route are known, and
-            // begin tracking this request in the in-flight gauge via the
-            // RAII guard.
+            // move the in-flight count to the upstream's alias.
             host_label = upstream.alias.clone();
             path_label = route
                 .match_rules
@@ -828,9 +1097,9 @@ impl DataPlaneServiceImpl {
 
         // 3. Validate query parameters against route's allowlist.
         if let Some(ref http_match) = route.match_rules.http
-            && !query_params.is_empty()
+            && !query.params.is_empty()
         {
-            for (key, _) in &query_params {
+            for (key, _) in &query.params {
                 if !http_match.query_allowlist.contains(key) {
                     return Err(DomainError::Validation {
                         field: "query",
@@ -843,6 +1112,7 @@ impl DataPlaneServiceImpl {
                     });
                 }
             }
+            query.allowlist_admitted();
         }
 
         // 3b. Enforce path_suffix_mode.
@@ -873,6 +1143,14 @@ impl DataPlaneServiceImpl {
             self.allow_http_upstream,
             &instance_uri,
         )?;
+
+        // 3d. Circuit breaker (`inst-rl-3`): an open circuit fails fast,
+        //     before the auth plugin, the rate limits and the CredStore read.
+        //     No probe slot is kept: the permit is taken at step 8a. At the
+        //     open → half-open edge, requests that pass here before the first
+        //     probe takes its slot at 8a do the steps in between and get 503
+        //     at 8a; once a probe holds the slot, this check rejects.
+        self.circuit_breakers.check(&upstream, &instance_uri)?;
 
         // 4. Prepare outbound headers (passthrough + strip).
         let mode = upstream
@@ -928,6 +1206,7 @@ impl DataPlaneServiceImpl {
         // guard rejection does not load it either. `config` mode keeps its
         // order.
         let mut early_rate_limit = None;
+        let mut signer = None;
         if request_ref.is_some() {
             early_rate_limit = Some(check_rate_limits(
                 &self.rate_limiter,
@@ -945,6 +1224,7 @@ impl DataPlaneServiceImpl {
             let auth_start = std::time::Instant::now();
             let auth_result = execute_auth_plugin(
                 &self.auth_registry,
+                &upstream,
                 auth,
                 &mut outbound_headers,
                 ctx,
@@ -957,7 +1237,8 @@ impl DataPlaneServiceImpl {
                 phase::AUTH,
                 auth_start.elapsed().as_secs_f64(),
             );
-            auth_result?;
+            let plugin = auth_result?;
+            signer = plugin.signs().then_some((plugin, auth));
         }
 
         // 5b. Execute guard plugins (upstream then route).
@@ -1049,11 +1330,11 @@ impl DataPlaneServiceImpl {
         // outbound headers. Errors are logged and skipped — transforms use
         // log-and-continue semantics. Compare with guards (step 5b) which
         // fail-hard.
-        execute_transform_requests(
+        let query_transformed = execute_transform_requests(
             &self.transform_registry,
             &transform_bindings,
             &mut outbound_headers,
-            &mut query_params,
+            &mut query.params,
             method.as_str(),
             &path_suffix,
             ctx,
@@ -1099,6 +1380,7 @@ impl DataPlaneServiceImpl {
                 self.request_timeout
             ),
             instance: instance_uri.clone(),
+            dispatch: Dispatch::NotSent,
         })??;
         let endpoint = &selected.endpoint;
 
@@ -1139,24 +1421,61 @@ impl DataPlaneServiceImpl {
             .as_ref()
             .map_or("/", |h| h.path.as_str());
         let remaining_suffix = route_suffix(&path_suffix, route_path)?;
-        let url = request_builder::build_upstream_url(
+        let mut url = request_builder::build_upstream_url(
             endpoint,
             route_path,
             remaining_suffix,
-            &query_params,
+            query.outbound(query_transformed).as_deref(),
         )?;
+
+        // 8a. Circuit breaker permit. It covers target resolution and the
+        //     exchange only, so a half-open probe slot is not held through
+        //     the gateway's own steps before it. Their time is not the
+        //     upstream's: a deadline hit counts only if they left it the full
+        //     budget. The signing phase (8c) is the gateway's too; its time
+        //     is taken off the budget after it. A request pinned to one
+        //     endpoint of several is not counted.
+        let pinned = upstream.server.endpoints.len() > 1
+            && req_headers.contains_key(TARGET_HOST_HEADER);
+        let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let mut permit = self
+            .circuit_breakers
+            .admit(&upstream, &instance_uri)?
+            .with_budget(budget, self.request_timeout)
+            .pinned_to_one_endpoint(pinned);
 
         // 8b. Engine target: the LB's pre-resolved address, or DNS with the
         // SSRF policy for target-host / single-endpoint selection.
-        let target = tokio::time::timeout_at(deadline, self.engine.target(&selected, &instance_uri))
-            .await
-            .map_err(|_| DomainError::RequestTimeout {
-                detail: format!(
-                    "resolving {} timed out after {:?}",
-                    endpoint.host, self.request_timeout
-                ),
-                instance: instance_uri.clone(),
-            })??;
+        let target = match tokio::time::timeout_at(
+            deadline,
+            self.engine.target(&selected, &instance_uri),
+        )
+        .await
+        {
+            Ok(Ok(target)) => target,
+            // A host that does not resolve is as unreachable as one that
+            // refuses the connection.
+            Ok(Err(TargetError::Unreachable(err))) => {
+                permit.failed(&err);
+                return Err(err);
+            }
+            // The gateway's own policy, not the upstream.
+            Ok(Err(TargetError::Refused(err))) => {
+                permit.ignored();
+                return Err(err);
+            }
+            Err(_) => {
+                permit.timed_out();
+                return Err(DomainError::RequestTimeout {
+                    detail: format!(
+                        "resolving {} timed out after {:?}",
+                        endpoint.host, self.request_timeout
+                    ),
+                    instance: instance_uri.clone(),
+                    dispatch: Dispatch::NotSent,
+                });
+            }
+        };
 
         let response_header_rules = upstream
             .headers
@@ -1176,12 +1495,110 @@ impl DataPlaneServiceImpl {
             host: &host_label,
         };
 
+        // Passthrough may have dropped `Connection`; the handshake needs it.
+        // Set here so the signing phase sees it.
+        if is_upgrade {
+            outbound_headers.insert(
+                http::header::CONNECTION,
+                HeaderValue::from_static("upgrade"),
+            );
+        }
+
+        // 8c. Signing phase of the auth plugin (ADR-0023): the last change to
+        //     the URL and headers. It sees them as sent and the body (empty
+        //     for a WebSocket handshake). A failure stops the request.
+        //     `request_ref` mode runs no auth plugin, so it has no signing.
+        //     The plugin's `sign` is timed as phase="sign", on errors and
+        //     timeouts too.
+        if let Some((plugin, auth)) = signer {
+            // The engine's header hygiene, applied now so the signer sees what
+            // the engine sends; the engine's own pass then changes nothing.
+            // A handshake is validated first, as the engine does, so one it
+            // would refuse is not normalised into one it accepts.
+            let kind = if is_upgrade {
+                sanitize::validate_websocket_upgrade(&method, &outbound_headers, true)
+                    .map_err(|e| map_proxy_error(&e, &instance_uri))?;
+                RequestKind::WebSocketUpgrade
+            } else {
+                RequestKind::Regular
+            };
+            sanitize::sanitize_request_headers(&mut outbound_headers, kind);
+            let uri = url
+                .parse::<http::Uri>()
+                .map_err(|e| DomainError::DownstreamError {
+                    detail: format!("invalid upstream request: {e}"),
+                    instance: instance_uri.clone(),
+                    dispatch: Dispatch::NotSent,
+                })?;
+            // The handshake goes out without a body, whatever the caller sent.
+            let body = if is_upgrade {
+                SigningBody::Buffered(Bytes::new())
+            } else if body_stream.is_some() {
+                SigningBody::Streamed
+            } else {
+                SigningBody::Buffered(body_bytes.clone())
+            };
+            // The trailing `/` is compared with the URL as built: the route
+            // path gives back one the normalization removed (route `/dir/`,
+            // request `/dir/`) and adds one the client did not send (route
+            // `/dir/`, request `/dir`). The root `/` names no resource.
+            let path_rewritten = path_rewrite.segments
+                || (uri.path() != "/"
+                    && path_rewrite.trailing_slash != uri.path().ends_with('/'));
+            let input = signing::SigningInput {
+                method: &method,
+                uri,
+                path_rewritten,
+                port: endpoint.port,
+                body,
+                config: auth.config.clone().unwrap_or_default(),
+                security_context: ctx.clone(),
+            };
+            // cancel-safe: sign_request changes the headers only after the
+            // plugin's sign returns, with no await after it, and the URL is
+            // replaced only on success; a timeout fails the request.
+            tracing::debug!(plugin = %auth.plugin_type, "signing the request");
+            let sign_start = tokio::time::Instant::now();
+            let signed = tokio::time::timeout_at(
+                deadline,
+                signing::sign_request(plugin.as_ref(), input, &mut outbound_headers),
+            )
+            .await;
+            let sign_time = sign_start.elapsed();
+            self.metrics.record_request_duration_seconds(
+                &host_label,
+                &path_label,
+                phase::SIGN,
+                sign_time.as_secs_f64(),
+            );
+            // The signer's CredStore reads are the gateway's time, not the
+            // upstream's: a slow store must not open the breaker.
+            permit = permit.with_budget(budget.saturating_sub(sign_time), self.request_timeout);
+            let signed_url = signed
+                .map_err(|_| DomainError::RequestTimeout {
+                    detail: format!(
+                        "signing the request timed out after {:?}",
+                        self.request_timeout
+                    ),
+                    instance: instance_uri.clone(),
+                    dispatch: Dispatch::NotSent,
+                })?
+                .map_err(|e| {
+                    auth_plugin_error(e, &instance_uri, AuthScope::new(&upstream, auth, ctx))
+                })?;
+            tracing::debug!(plugin = %auth.plugin_type, "request signed");
+            if let Some(signed_url) = signed_url {
+                url = signed_url;
+            }
+        }
+
         // 9. WebSocket upgrade: tunnel on a dedicated upstream connection,
         // only after the upstream switched protocols.
         if is_upgrade {
             return self
                 .handle_websocket_upgrade(
                     &target,
+                    permit,
                     deadline,
                     &method,
                     &url,
@@ -1196,6 +1613,7 @@ impl DataPlaneServiceImpl {
         let upstream_result = self
             .forward(
                 &target,
+                permit,
                 deadline,
                 &method,
                 &url,
@@ -1225,20 +1643,25 @@ impl DataPlaneServiceImpl {
         }
         .await;
 
-        match &result {
-            Ok(resp) => guard.set_success(resp.status().as_u16()),
-            Err(err) => guard.set_error(domain_error_type_name(err)),
+        match result {
+            Ok(resp) => {
+                guard.set_success(resp.status().as_u16());
+                Ok(guard.observe_body(resp, &routed))
+            }
+            Err(err) => {
+                guard.set_error(&err);
+                Err(err)
+            }
         }
-
-        result
     }
 }
 
-/// Evict idle rate-limit buckets every `interval` until `cancel` fires or the
-/// limiter is gone. The stream shutdown signal does not stop it: a gear stop
-/// and a later start keep the same limiter.
-async fn sweep_rate_limits(
+/// Evict idle rate-limit buckets and circuit breakers every `interval` until
+/// `cancel` fires or the limiter is gone. The stream shutdown signal does not
+/// stop it: a gear stop and a later start keep the same limiter and breakers.
+async fn sweep_idle_state(
     limiter: Weak<RateLimiter>,
+    breakers: Weak<CircuitBreakers>,
     metrics: Arc<dyn OagwMetricsPort>,
     interval: Duration,
     cancel: CancellationToken,
@@ -1259,6 +1682,12 @@ async fn sweep_rate_limits(
                 if evicted > 0 {
                     tracing::debug!(evicted, live, "evicted idle rate-limit buckets");
                 }
+                if let Some(breakers) = breakers.upgrade() {
+                    let evicted = breakers.evict_idle();
+                    if evicted > 0 {
+                        tracing::debug!(evicted, live = breakers.len(), "evicted idle circuit breakers");
+                    }
+                }
             }
         }
     }
@@ -1273,10 +1702,16 @@ impl DataPlaneServiceImpl {
     /// answered `101 Switching Protocols`. Response guards and the response
     /// pipeline run on the 101; the tunnel travels to the handler in the
     /// response extensions.
+    ///
+    /// The circuit breaker sees the handshake only: a 101 or another status
+    /// is an answer (502-504 failures), a transport error or timeout a
+    /// failure (a deadline hit as in [`UpstreamPermit::timed_out`]). What
+    /// happens on the tunnel afterwards is not counted.
     #[allow(clippy::too_many_arguments)]
     async fn handle_websocket_upgrade(
         &self,
         target: &toolkit_http_proxy::Target,
+        permit: UpstreamPermit,
         deadline: tokio::time::Instant,
         method: &http::Method,
         url: &str,
@@ -1284,33 +1719,54 @@ impl DataPlaneServiceImpl {
         pipeline: &ResponsePipelineCtx<'_>,
         instance_uri: &str,
     ) -> Result<http::Response<Body>, DomainError> {
-        let mut headers = outbound_headers.clone();
-        // Passthrough may have dropped `Connection`; the handshake needs it.
-        headers.insert(
-            http::header::CONNECTION,
-            HeaderValue::from_static("upgrade"),
-        );
-        let req = build_outbound_request(method, url, headers, empty_body(), instance_uri)?;
+        let req = build_outbound_request(
+            method,
+            url,
+            outbound_headers.clone(),
+            empty_body(),
+            instance_uri,
+        )?;
 
         let upgrade_timeout = self.request_timeout;
-        let outcome = tokio::time::timeout_at(deadline, self.engine.client().upgrade(target, req))
-            .await
-            .map_err(|_| DomainError::RequestTimeout {
-                // No URL: its query string may carry credentials.
-                detail: format!("upstream WebSocket upgrade timed out after {upgrade_timeout:?}"),
-                instance: instance_uri.to_string(),
-            })?
-            .map_err(|e| map_proxy_error(&e, instance_uri))?;
+        let outcome = match tokio::time::timeout_at(
+            deadline,
+            self.engine.client().upgrade(target, req),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(e)) => {
+                let err = map_proxy_error(&e, instance_uri);
+                permit.failed(&err);
+                return Err(err);
+            }
+            Err(_) => {
+                permit.timed_out();
+                return Err(DomainError::RequestTimeout {
+                    // No URL: its query string may carry credentials.
+                    detail: format!(
+                        "upstream WebSocket upgrade timed out after {upgrade_timeout:?}"
+                    ),
+                    instance: instance_uri.to_string(),
+                    dispatch: Dispatch::MaybeSent,
+                });
+            }
+        };
 
         let (response, io) = match outcome {
-            UpgradeOutcome::Switched { response, io } => (response, io),
+            UpgradeOutcome::Switched { response, io } => {
+                permit.answered(response.status());
+                (response, io)
+            }
             UpgradeOutcome::Rejected(resp) => {
+                permit.answered(resp.status());
                 return Err(DomainError::ProtocolError {
                     detail: format!(
                         "upstream rejected WebSocket upgrade with status {}",
                         resp.status()
                     ),
                     instance: instance_uri.to_string(),
+                    dispatch: Dispatch::MaybeSent,
                 });
             }
         };
@@ -1372,6 +1828,7 @@ impl DataPlaneServiceImpl {
     async fn forward(
         &self,
         target: &toolkit_http_proxy::Target,
+        permit: UpstreamPermit,
         deadline: tokio::time::Instant,
         method: &http::Method,
         url: &str,
@@ -1383,6 +1840,7 @@ impl DataPlaneServiceImpl {
         instance_uri: &str,
     ) -> Result<http::Response<Body>, DomainError> {
         let body_state = Arc::new(StreamedBodyState::default());
+        let streamed = body_stream.is_some();
         let (body, replay) = match body_stream {
             Some(stream) => (
                 stream_body(limit_body_stream(stream, max_body, Arc::clone(&body_state))),
@@ -1403,25 +1861,51 @@ impl DataPlaneServiceImpl {
             tokio::time::timeout_at(deadline, self.engine.client().send(target, req)).await;
 
         // A failure on our side of the body wins over whatever the upstream
-        // made of the aborted request.
+        // made of the aborted request, and says nothing about the upstream.
         if let Some(err) = body_state.failure(max_body, instance_uri) {
             return Err(err);
         }
-        let resp = outcome
-            .map_err(|_| DomainError::RequestTimeout {
-                // No URL: its query string may carry credentials.
-                detail: format!("upstream request timed out after {timeout:?}"),
-                instance: instance_uri.to_string(),
-            })?
-            .map_err(|e| {
+        // Until the client has sent its whole body the exchange runs at the
+        // client's pace: a client trickling its upload would otherwise hit
+        // the deadline or the engine's read timeout and open the circuit
+        // for every tenant. Only failing to reach the upstream counts then.
+        let upload_done = !streamed || body_state.finished();
+        // Recorded at the response head: an SSE or long body that fails
+        // later does not count.
+        let resp = match outcome {
+            Ok(Ok(resp)) => {
+                permit.answered(resp.status());
+                resp
+            }
+            Ok(Err(e)) => {
                 tracing::warn!(
                     method = %method,
                     path = pipeline.path_suffix,
                     error = %e,
                     "Proxy request failed"
                 );
-                map_proxy_error(&e, instance_uri)
-            })?;
+                let err = map_proxy_error(&e, instance_uri);
+                if upload_done || is_connect_failure(&e) {
+                    permit.failed(&err);
+                } else {
+                    permit.ignored();
+                }
+                return Err(err);
+            }
+            Err(_) => {
+                if upload_done {
+                    permit.timed_out();
+                } else {
+                    permit.ignored();
+                }
+                return Err(DomainError::RequestTimeout {
+                    // No URL: its query string may carry credentials.
+                    detail: format!("upstream request timed out after {timeout:?}"),
+                    instance: instance_uri.to_string(),
+                    dispatch: Dispatch::MaybeSent,
+                });
+            }
+        };
 
         let (parts, mut body) = resp.into_parts();
         // SSE streams may stay silent longer than the read timeout; the
@@ -1459,6 +1943,7 @@ fn build_outbound_request(
         .map_err(|e| DomainError::DownstreamError {
             detail: format!("invalid upstream request: {e}"),
             instance: instance_uri.to_string(),
+            dispatch: Dispatch::NotSent,
         })?;
     *req.headers_mut() = headers;
     Ok(req)
@@ -1471,9 +1956,15 @@ struct StreamedBodyState {
     exceeded: std::sync::OnceLock<usize>,
     /// Why the client's body stream failed.
     failed: std::sync::OnceLock<String>,
+    /// The client's body stream ended cleanly.
+    finished: std::sync::atomic::AtomicBool,
 }
 
 impl StreamedBodyState {
+    fn finished(&self) -> bool {
+        self.finished.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn failure(&self, max_body: usize, instance_uri: &str) -> Option<DomainError> {
         if let Some(total) = self.exceeded.get() {
             return Some(DomainError::PayloadTooLarge {
@@ -1488,21 +1979,23 @@ impl StreamedBodyState {
             .map(|reason| DomainError::DownstreamError {
                 detail: format!("streaming request body failed mid-stream: {reason}"),
                 instance: instance_uri.to_string(),
+                dispatch: Dispatch::MaybeSent,
             })
     }
 }
 
-/// Enforce `max_body` on a streamed request body, recording failures in
-/// `state`. Empty chunks are dropped. A breach or a stream error ends the
-/// stream with an error, which aborts the upstream request without a
-/// terminating chunk.
+/// Enforce `max_body` on a streamed request body, recording failures and
+/// the clean end in `state`. Empty chunks are dropped. A breach or a stream
+/// error ends the stream with an error, which aborts the upstream request
+/// without a terminating chunk.
 fn limit_body_stream(
     stream: BodyStream,
     max_body: usize,
     state: Arc<StreamedBodyState>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, oagw_sdk::body::BoxError>> + Send {
     let mut total: usize = 0;
-    stream.filter_map(move |chunk| {
+    let end = Arc::clone(&state);
+    let limited = stream.filter_map(move |chunk| {
         let item = match chunk {
             Ok(bytes) if bytes.is_empty() => None,
             Ok(bytes) => {
@@ -1526,21 +2019,31 @@ fn limit_body_stream(
             }
         };
         std::future::ready(item)
+    });
+    // Polled only once the client's stream has ended. After an error item
+    // the body state reports the failure first, whatever this says.
+    let end = futures_util::stream::once(async move {
+        end.finished
+            .store(true, std::sync::atomic::Ordering::Release);
     })
+    .filter_map(|()| std::future::ready(None));
+    limited.chain(end)
 }
 
 /// Execute the auth plugin for the upstream and set the headers it asks for
-/// (e.g. Bearer token, API key) on the outbound request.
+/// (e.g. Bearer token, API key) on the outbound request. Returns the plugin
+/// for its signing phase.
 ///
 /// Only the named headers change: other lines, repeated ones and non-UTF-8
 /// values included, pass through as the client sent them.
 async fn execute_auth_plugin(
     auth_registry: &AuthPluginRegistry,
+    upstream: &Upstream,
     auth: &crate::domain::model::AuthConfig,
     outbound_headers: &mut HeaderMap,
     ctx: &SecurityContext,
     instance_uri: &str,
-) -> Result<(), DomainError> {
+) -> Result<Arc<dyn AuthPlugin>, DomainError> {
     tracing::debug!(plugin = %auth.plugin_type, "executing auth plugin");
     let plugin = auth_registry.resolve(&auth.plugin_type).map_err(|e| {
         DomainError::AuthenticationFailed {
@@ -1554,9 +2057,9 @@ async fn execute_auth_plugin(
         .authenticate(&mut auth_ctx)
         .await
         .and_then(|()| set_auth_headers(outbound_headers, auth_ctx.set_headers))
-        .map_err(|e| auth_plugin_error(e, instance_uri))?;
+        .map_err(|e| auth_plugin_error(e, instance_uri, AuthScope::new(upstream, auth, ctx)))?;
     tracing::debug!(plugin = %auth.plugin_type, "auth plugin succeeded");
-    Ok(())
+    Ok(plugin)
 }
 
 /// Set the headers an auth plugin asked for, each replacing any line of the
@@ -1580,28 +2083,146 @@ fn set_auth_headers(
     Ok(())
 }
 
-fn auth_plugin_error(e: PluginError, instance_uri: &str) -> DomainError {
+/// The request an auth plugin ran for, as its failure log names it.
+#[derive(Clone, Copy)]
+struct AuthScope<'a> {
+    caller_tenant_id: uuid::Uuid,
+    upstream_id: uuid::Uuid,
+    upstream_alias: &'a str,
+    plugin_type: &'a str,
+}
+
+impl<'a> AuthScope<'a> {
+    fn new(
+        upstream: &'a Upstream,
+        auth: &'a crate::domain::model::AuthConfig,
+        ctx: &SecurityContext,
+    ) -> Self {
+        Self {
+            caller_tenant_id: ctx.subject_tenant_id(),
+            upstream_id: upstream.id,
+            upstream_alias: &upstream.alias,
+            plugin_type: &auth.plugin_type,
+        }
+    }
+}
+
+/// The one mapping of auth plugin errors, for `authenticate` and `sign`
+/// alike. The detail names a config key at most, never a reference or a
+/// secret; it stays in the server log. A missing secret, a credential store
+/// outage, an identity provider outage and an invalid identity provider
+/// response are warned here, once, with `scope`; the REST mapping does not
+/// log them again.
+fn auth_plugin_error(e: PluginError, instance_uri: &str, scope: AuthScope<'_>) -> DomainError {
+    let instance = instance_uri.to_string();
     match e {
-        PluginError::SecretNotFound(_) => DomainError::SecretNotFound {
-            detail: e.to_string(),
-            instance: instance_uri.to_string(),
+        PluginError::SecretNotFound { key, kind } => {
+            tracing::warn!(
+                caller_tenant_id = %scope.caller_tenant_id,
+                upstream_id = %scope.upstream_id,
+                upstream_alias = scope.upstream_alias,
+                plugin = scope.plugin_type,
+                config_key = %format_args!("auth.config.{key}"),
+                error = kind,
+                "auth plugin: credential not accessible"
+            );
+            DomainError::SecretNotFound {
+                detail: e.to_string(),
+                instance,
+            }
+        }
+        PluginError::CredentialStoreUnavailable {
+            detail,
+            retry_after,
+        } => {
+            // `detail` names the config key being read.
+            tracing::warn!(
+                caller_tenant_id = %scope.caller_tenant_id,
+                upstream_id = %scope.upstream_id,
+                upstream_alias = scope.upstream_alias,
+                plugin = scope.plugin_type,
+                reason = %detail,
+                "auth plugin: credential store unavailable"
+            );
+            DomainError::CredentialStoreUnavailable {
+                detail,
+                retry_after,
+                instance,
+            }
+        }
+        PluginError::IdpUnavailable(_) => {
+            let detail = e.to_string();
+            tracing::warn!(
+                caller_tenant_id = %scope.caller_tenant_id,
+                upstream_id = %scope.upstream_id,
+                upstream_alias = scope.upstream_alias,
+                plugin = scope.plugin_type,
+                reason = %detail,
+                "auth plugin: OAuth2 identity provider unavailable"
+            );
+            DomainError::IdpUnavailable { detail, instance }
+        }
+        PluginError::IdpInvalidResponse(_) => {
+            let detail = e.to_string();
+            tracing::warn!(
+                caller_tenant_id = %scope.caller_tenant_id,
+                upstream_id = %scope.upstream_id,
+                upstream_alias = scope.upstream_alias,
+                plugin = scope.plugin_type,
+                reason = %detail,
+                "auth plugin: identity provider sent an invalid response"
+            );
+            DomainError::IdpInvalidResponse { detail, instance }
+        }
+        PluginError::AuthFailed(_) | PluginError::Rejected(_) => {
+            DomainError::AuthenticationFailed {
+                reason: reason::auth::PLUGIN_FAILED,
+                detail: e.to_string(),
+                instance,
+            }
+        }
+        PluginError::InvalidRequest {
+            field: name,
+            detail,
+        } => DomainError::Validation {
+            field: name,
+            reason: field::VALIDATION,
+            detail,
+            instance,
         },
-        PluginError::Rejected(msg) | PluginError::InvalidConfig(msg) => DomainError::Validation {
-            field: "plugin",
-            reason: field::INVALID_PLUGIN_CONFIG,
-            detail: msg,
-            instance: instance_uri.to_string(),
-        },
-        PluginError::AuthFailed(_) => DomainError::AuthenticationFailed {
-            reason: reason::auth::PLUGIN_FAILED,
-            detail: e.to_string(),
-            instance: instance_uri.to_string(),
-        },
-        PluginError::Internal(_) => DomainError::AuthenticationFailed {
-            reason: reason::auth::PLUGIN_INTERNAL,
-            detail: e.to_string(),
-            instance: instance_uri.to_string(),
-        },
+        PluginError::InvalidConfig(_) => {
+            // The response says only `internal`; the log names the config
+            // key at fault. Plugin messages never carry a secret.
+            let message = format!("auth plugin misconfigured: {e}");
+            tracing::warn!(
+                caller_tenant_id = %scope.caller_tenant_id,
+                upstream_id = %scope.upstream_id,
+                upstream_alias = scope.upstream_alias,
+                plugin = scope.plugin_type,
+                reason = %message,
+                "auth plugin misconfigured"
+            );
+            DomainError::Internal { message }
+        }
+        PluginError::Internal(_) => {
+            // A stored secret the header cannot carry, or an unexpected
+            // store error: logged as in `request_ref` mode, so an operator
+            // can find it. The detail names the config key, never the value.
+            let detail = e.to_string();
+            tracing::warn!(
+                caller_tenant_id = %scope.caller_tenant_id,
+                upstream_id = %scope.upstream_id,
+                upstream_alias = scope.upstream_alias,
+                plugin = scope.plugin_type,
+                reason = %detail,
+                "auth plugin failed"
+            );
+            DomainError::AuthenticationFailed {
+                reason: reason::auth::PLUGIN_INTERNAL,
+                detail,
+                instance,
+            }
+        }
     }
 }
 
@@ -1670,6 +2291,8 @@ async fn execute_guard_requests(
 /// Placed after header rules so transforms have the final word on outbound
 /// headers. Errors are logged and skipped — transforms use log-and-continue
 /// semantics so a single misbehaving transform cannot block the pipeline.
+///
+/// Returns whether the transforms changed the query parameters.
 async fn execute_transform_requests(
     transform_registry: &TransformPluginRegistry,
     transform_bindings: &[&crate::domain::model::PluginBinding],
@@ -1678,9 +2301,9 @@ async fn execute_transform_requests(
     method: &str,
     path_suffix: &str,
     ctx: &SecurityContext,
-) {
+) -> bool {
     if transform_bindings.is_empty() {
-        return;
+        return false;
     }
 
     let original_headers = headers::header_map_to_vec(outbound_headers);
@@ -1724,7 +2347,11 @@ async fn execute_transform_requests(
     // Apply only what the transforms changed: other lines, credentials set by
     // the auth plugin included, keep their bytes and sensitive flag.
     headers::apply_header_edits(outbound_headers, &original_headers, &transform_headers);
+    if transform_query == *query_params {
+        return false;
+    }
     *query_params = transform_query;
+    true
 }
 
 /// Enforce CORS origin and method constraints for actual (non-preflight) requests.
@@ -1787,7 +2414,9 @@ struct RequestRefState {
 /// keys `scope: ip` limits on the shared `unknown` bucket.
 ///
 /// Side effect: updates `rate_limit_usage_ratio` and (on rejection)
-/// `rate_limit_exceeded_total` metrics via the injected port.
+/// `rate_limit_exceeded_total` metrics via the injected port, one series
+/// per [`RateLimitBucket`]; the shadowed routes' series gets the highest
+/// ratio among them.
 #[allow(clippy::too_many_arguments)]
 fn check_rate_limits(
     rate_limiter: &RateLimiter,
@@ -1805,22 +2434,21 @@ fn check_rate_limits(
     let tenant_id = ctx.subject_tenant_id();
     let subject_id = ctx.subject_id();
 
-    let mut consume = |key: &str, rl: &RateLimitConfig| -> Result<(), DomainError> {
-        let raw = rate_limiter.try_consume(key, rl, instance_uri);
-        match &raw {
-            Ok(o) if o.limit > 0 => {
-                let used = o.limit.saturating_sub(o.remaining) as f64;
-                let ratio = used / o.limit as f64;
-                metrics.record_rate_limit_usage_ratio(host_label, path_label, ratio);
-            }
-            Ok(_) => {}
-            Err(DomainError::RateLimitExceeded { .. }) => {
-                metrics.record_rate_limit_exceeded(host_label, path_label);
-                metrics.record_rate_limit_usage_ratio(host_label, path_label, 1.0);
-            }
-            Err(_) => {}
-        }
-        let result = raw?;
+    // Consume a token; the bucket's usage ratio when it admits the request.
+    let mut consume = |key: &str,
+                       rl: &RateLimitConfig,
+                       bucket: RateLimitBucket|
+     -> Result<Option<f64>, DomainError> {
+        let result = rate_limiter
+            .try_consume(key, rl, instance_uri)
+            .inspect_err(|e| {
+                if matches!(e, DomainError::RateLimitExceeded { .. }) {
+                    metrics.record_rate_limit_exceeded(host_label, path_label, bucket);
+                    metrics.record_rate_limit_usage_ratio(host_label, path_label, bucket, 1.0);
+                }
+            })?;
+        let ratio = (result.limit > 0)
+            .then(|| result.limit.saturating_sub(result.remaining) as f64 / result.limit as f64);
         // The tighter bucket's numbers are reported; on a tie the earlier
         // one stays. Headers are sent if any checked limit enables them.
         outcome = match outcome {
@@ -1832,17 +2460,15 @@ fn check_rate_limits(
                 rl.response_headers || previous.is_some_and(|(_, shown)| shown),
             )),
         };
-        Ok(())
+        Ok(ratio)
     };
-
-    let route_limits = route
-        .rate_limit
-        .as_ref()
-        .map(|rl| (&route.id, rl))
-        .into_iter()
-        .chain(shadowed.iter().rev().map(|s| (&s.route_id, &s.rate_limit)));
-    for (route_id, rl) in route_limits {
-        let key = build_rate_limit_key(&RateLimitKeyContext {
+    let record_usage = |bucket: RateLimitBucket, ratio: Option<f64>| {
+        if let Some(ratio) = ratio {
+            metrics.record_rate_limit_usage_ratio(host_label, path_label, bucket, ratio);
+        }
+    };
+    let route_key = |route_id: &uuid::Uuid, rl: &RateLimitConfig| {
+        build_rate_limit_key(&RateLimitKeyContext {
             resource: RateLimitResource::Route,
             resource_id: route_id,
             limit_owner: None,
@@ -1852,9 +2478,28 @@ fn check_rate_limits(
             route_id,
             client_ip,
             window: &rl.sustained.window,
-        });
-        consume(&key, rl)?;
+        })
+    };
+
+    if let Some(ref rl) = route.rate_limit {
+        let ratio = consume(&route_key(&route.id, rl), rl, RateLimitBucket::Route)?;
+        record_usage(RateLimitBucket::Route, ratio);
     }
+    // The shadowed routes share one series: it shows the one closest to its
+    // limit, not the last one checked.
+    let mut shadowed_max: Option<f64> = None;
+    for s in shadowed.iter().rev() {
+        let ratio = consume(
+            &route_key(&s.route_id, &s.rate_limit),
+            &s.rate_limit,
+            RateLimitBucket::ShadowedRoute,
+        )?;
+        shadowed_max = match (shadowed_max, ratio) {
+            (Some(max), Some(ratio)) => Some(max.max(ratio)),
+            (max, ratio) => max.or(ratio),
+        };
+    }
+    record_usage(RateLimitBucket::ShadowedRoute, shadowed_max);
 
     if let Some(ref rl) = upstream.rate_limit {
         // A shared budget keys the scoped bucket on the pool owner, so
@@ -1883,10 +2528,16 @@ fn check_rate_limits(
             client_ip,
             window: &rl.sustained.window,
         });
-        consume(&key, rl)?;
+        let ratio = consume(&key, rl, RateLimitBucket::Upstream)?;
+        record_usage(RateLimitBucket::Upstream, ratio);
 
         if let Some(ref pool) = rl.shared_pool {
-            consume(&build_pool_key(pool), &pool_config(pool, rl))?;
+            let ratio = consume(
+                &build_pool_key(pool),
+                &pool_config(pool, rl),
+                RateLimitBucket::Pool,
+            )?;
+            record_usage(RateLimitBucket::Pool, ratio);
         }
     }
 
@@ -2117,6 +2768,8 @@ fn domain_error_type_name(err: &DomainError) -> &'static str {
         DomainError::SecretNotFound { .. } => "SecretNotFound",
         DomainError::SecretRefNotAccessible { .. } => "SecretRefNotAccessible",
         DomainError::CredentialStoreUnavailable { .. } => "CredentialStoreUnavailable",
+        DomainError::IdpUnavailable { .. } => "IdpUnavailable",
+        DomainError::IdpInvalidResponse { .. } => "IdpInvalidResponse",
         DomainError::DownstreamError { .. } => "DownstreamError",
         DomainError::ProtocolError { .. } => "ProtocolError",
         DomainError::UpstreamDisabled { .. } => "UpstreamDisabled",
@@ -2153,6 +2806,7 @@ fn build_proxy_response(
         .map_err(|e| DomainError::DownstreamError {
             detail: format!("failed to build response: {e}"),
             instance: instance_uri,
+            dispatch: Dispatch::MaybeSent,
         })?;
     *resp.headers_mut() = resp_headers;
     resp.extensions_mut().insert(error_source);
@@ -2160,7 +2814,7 @@ fn build_proxy_response(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::domain::model::{Endpoint, ManagedBy, Scheme, Server, Upstream};
     use crate::domain::proxy_path::normalize_percent_encoding;
@@ -2432,6 +3086,7 @@ mod tests {
             headers: None,
             plugins: None,
             rate_limit: None,
+            circuit_breaker: None,
             cors: None,
             tags: vec![],
             managed_by: ManagedBy::Api,
@@ -2677,6 +3332,7 @@ mod tests {
             engine,
             metrics,
             Arc::new(RateLimiter::new()),
+            Arc::new(CircuitBreakers::new()),
         )
     }
 
@@ -2918,8 +3574,9 @@ mod tests {
         limiter
             .try_consume("key", &fast_refill_config(), "/test")
             .unwrap();
-        let sweep = tokio::spawn(sweep_rate_limits(
+        let sweep = tokio::spawn(sweep_idle_state(
             Arc::downgrade(&limiter),
+            Weak::new(),
             Arc::new(crate::domain::ports::NoopMetrics),
             Duration::from_millis(5),
             CancellationToken::new(),
@@ -3329,11 +3986,38 @@ mod tests {
         }
         fn increment_in_flight(&self, _: &str) {}
         fn decrement_in_flight(&self, _: &str) {}
-        fn record_rate_limit_exceeded(&self, _: &str, _: &str) {}
-        fn record_rate_limit_usage_ratio(&self, _: &str, _: &str, _: f64) {}
+        fn record_rate_limit_exceeded(
+            &self,
+            _: &str,
+            _: &str,
+            _: crate::domain::ports::metric_labels::RateLimitBucket,
+        ) {
+        }
+        fn record_rate_limit_usage_ratio(
+            &self,
+            _: &str,
+            _: &str,
+            _: crate::domain::ports::metric_labels::RateLimitBucket,
+            _: f64,
+        ) {
+        }
         fn increment_active_websocket_sessions(&self, _: &str) {}
         fn decrement_active_websocket_sessions(&self, _: &str) {}
-        fn record_websocket_session_duration_seconds(&self, _: &str, _: f64) {}
+        fn record_websocket_session_duration_seconds(
+            &self,
+            _: &str,
+            _: crate::domain::ports::metric_labels::StreamOutcome,
+            _: f64,
+        ) {
+        }
+        fn record_stream_duration_seconds(
+            &self,
+            _: &str,
+            _: &str,
+            _: crate::domain::ports::metric_labels::StreamOutcome,
+            _: f64,
+        ) {
+        }
         fn record_rate_limit_sweep(&self, _: u64, _: u64) {}
         fn record_registry_provisioning_failure(&self, _: &str, _: &str) {}
         fn record_registry_provisioning_run(&self, _: &str) {}
@@ -3464,10 +4148,10 @@ mod tests {
 
     /// Keeps the request counters, durations and in-flight changes.
     #[derive(Default)]
-    struct RequestRecorder(std::sync::Mutex<Vec<String>>);
+    pub(crate) struct RequestRecorder(std::sync::Mutex<Vec<String>>);
 
     impl RequestRecorder {
-        fn events(&self) -> Vec<String> {
+        pub(crate) fn events(&self) -> Vec<String> {
             self.0.lock().unwrap().clone()
         }
         fn push(&self, event: String) {
@@ -3478,37 +4162,63 @@ mod tests {
     impl OagwMetricsPort for RequestRecorder {
         fn record_request(
             &self,
+            host: &str,
             _: &str,
-            _: &str,
-            _: &str,
+            method: &str,
             status: u16,
             _: Option<crate::domain::plugin::credentials::CredentialMode>,
         ) {
-            self.push(format!("request {status}"));
+            self.push(format!("request {host} {method} {status}"));
         }
         fn record_error(
             &self,
-            _: &str,
+            host: &str,
             _: &str,
             variant: &str,
             _: Option<crate::domain::plugin::credentials::CredentialMode>,
         ) {
-            self.push(format!("error {variant}"));
+            self.push(format!("error {host} {variant}"));
         }
         fn record_request_duration_seconds(&self, _: &str, _: &str, phase: &str, _: f64) {
             self.push(format!("duration {phase}"));
         }
-        fn increment_in_flight(&self, _: &str) {
-            self.push("in_flight +1".to_owned());
+        fn record_stream_duration_seconds(
+            &self,
+            host: &str,
+            _: &str,
+            outcome: crate::domain::ports::metric_labels::StreamOutcome,
+            _: f64,
+        ) {
+            self.push(format!("stream {host} {}", outcome.as_str()));
         }
-        fn decrement_in_flight(&self, _: &str) {
-            self.push("in_flight -1".to_owned());
+        fn increment_in_flight(&self, host: &str) {
+            self.push(format!("in_flight +1 {host}"));
         }
-        fn record_rate_limit_exceeded(&self, _: &str, _: &str) {}
-        fn record_rate_limit_usage_ratio(&self, _: &str, _: &str, _: f64) {}
+        fn decrement_in_flight(&self, host: &str) {
+            self.push(format!("in_flight -1 {host}"));
+        }
+        fn record_rate_limit_exceeded(&self, _: &str, _: &str, bucket: RateLimitBucket) {
+            self.push(format!("exceeded {}", bucket.as_str()));
+        }
+        fn record_rate_limit_usage_ratio(
+            &self,
+            _: &str,
+            _: &str,
+            bucket: RateLimitBucket,
+            ratio: f64,
+        ) {
+            self.push(format!("usage {} {ratio}", bucket.as_str()));
+        }
         fn increment_active_websocket_sessions(&self, _: &str) {}
         fn decrement_active_websocket_sessions(&self, _: &str) {}
-        fn record_websocket_session_duration_seconds(&self, _: &str, _: f64) {}
+        fn record_websocket_session_duration_seconds(
+            &self,
+            _: &str,
+            _: crate::domain::ports::metric_labels::StreamOutcome,
+            _: f64,
+        ) {
+        }
+
         fn record_rate_limit_sweep(&self, _: u64, _: u64) {}
         fn record_registry_provisioning_failure(&self, _: &str, _: &str) {}
         fn record_registry_provisioning_run(&self, _: &str) {}
@@ -3548,28 +4258,35 @@ mod tests {
         fn record_proxy_cache_publish_failures(&self, _: &str, _: u64) {}
     }
 
-    /// `authorize_proxy` counts a denial; a grant counts nothing, since the
-    /// proxied request is counted when it completes (#4981).
+    /// `authorize_proxy` counts a denial, with the request's method and the
+    /// 403 the client gets; a grant held counts nothing, since the proxied
+    /// request is counted when it completes (#4981, #4989).
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn authorize_proxy_counts_only_a_denial() {
         let metrics = Arc::new(RequestRecorder::default());
         let allowed =
             build_svc_with_decision(Arc::new(MockSelector::new()), metrics.clone(), None, true);
-        allowed.authorize_proxy(test_ctx()).await.unwrap();
+        let _grant = allowed
+            .authorize_proxy(test_ctx(), &http::Method::POST)
+            .await
+            .unwrap();
         assert!(metrics.events().is_empty(), "{:?}", metrics.events());
 
         let denied =
             build_svc_with_decision(Arc::new(MockSelector::new()), metrics.clone(), None, false);
-        let err = denied.authorize_proxy(test_ctx()).await.unwrap_err();
+        let err = denied
+            .authorize_proxy(test_ctx(), &http::Method::POST)
+            .await
+            .unwrap_err();
         assert!(logs_contain("OAGW proxy call denied"));
         assert!(matches!(err, DomainError::Forbidden { .. }), "{err:?}");
-        let events = metrics.events();
         assert_eq!(
-            events,
-            vec![
-                format!("duration {}", phase::TOTAL),
-                "error Forbidden".to_owned()
+            metrics.events(),
+            [
+                "duration total",
+                "request unknown POST 403",
+                "error unknown Forbidden",
             ]
         );
     }
@@ -3683,10 +4400,10 @@ mod tests {
     }
 
     /// A secret that is gone at proxy time, or a credential store failure,
-    /// names the auth config key. The reference reaches neither the error
-    /// returned to the caller nor the logs; that includes the canonical
-    /// diagnostic, which the canonical error middleware logs at ERROR
-    /// (#4989).
+    /// names the auth config key in the error and in the warn log of the auth
+    /// plugin step. The reference reaches neither the error returned to the
+    /// caller nor the logs (#4989). A missing secret's 401 carries no
+    /// diagnostic, so the warn log is where the key shows.
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn proxy_time_secret_failures_do_not_reveal_the_ref() {
@@ -3721,21 +4438,107 @@ mod tests {
             assert!(!text.contains("leaked-ref-77"), "{text}");
             if i == 0 {
                 assert!(matches!(err, DomainError::SecretNotFound { .. }), "{err:?}");
+            } else {
+                assert!(
+                    matches!(err, DomainError::CredentialStoreUnavailable { .. }),
+                    "{err:?}"
+                );
             }
 
             let canonical = CanonicalError::from(err);
             let text = format!("{canonical:?}");
             assert!(!text.contains("leaked-ref-77"), "{text}");
             if i == 0 {
-                let diagnostic = canonical.diagnostic().unwrap_or_default();
                 assert!(
-                    diagnostic.contains("auth.config.secret_ref"),
-                    "{diagnostic}"
+                    matches!(&canonical, CanonicalError::Unauthenticated { ctx, .. }
+                        if ctx.reason.as_deref() == Some(oagw_sdk::reason::auth::CREDENTIAL_NOT_FOUND)),
+                    "{canonical:?}"
                 );
+                // One warn, naming the key and the store's error kind.
+                assert!(logs_contain("auth.config.secret_ref"));
+                assert!(logs_contain("secret not found"));
+                assert!(!logs_contain("leaked-ref-77"));
             }
+            // One warn line per failed request, however often the error is
+            // converted: so far one missing secret and `i` store outages.
+            logs_assert(|lines: &[&str]| {
+                assert_log_count(lines, "auth plugin: credential not accessible", 1)?;
+                assert_log_count(lines, "auth plugin: credential store unavailable", i)
+            });
         }
         assert!(logs_contain("executing auth plugin"));
         assert!(!logs_contain("leaked-ref-77"));
+    }
+
+    /// Fails unless exactly `expected` log lines contain `message`.
+    fn assert_log_count(lines: &[&str], message: &str, expected: usize) -> Result<(), String> {
+        let found: Vec<_> = lines.iter().filter(|l| l.contains(message)).collect();
+        if found.len() == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "expected {expected} line(s) with {message:?}, got {found:#?}"
+            ))
+        }
+    }
+
+    /// An identity provider outage and an invalid IdP response are each
+    /// warned once, by the auth plugin step with the request's identifiers;
+    /// the REST conversions, which run more than once per error, only log at
+    /// debug.
+    #[test]
+    #[tracing_test::traced_test]
+    fn idp_failures_warn_once() {
+        use toolkit_canonical_errors::CanonicalError;
+
+        let scope = AuthScope {
+            caller_tenant_id: uuid::Uuid::nil(),
+            upstream_id: uuid::Uuid::nil(),
+            upstream_alias: "idp-upstream",
+            plugin_type: "oauth2-test",
+        };
+        let cases = [
+            (
+                PluginError::IdpUnavailable("token endpoint returned 503".into()),
+                "auth plugin: OAuth2 identity provider unavailable",
+                "token endpoint returned 503",
+            ),
+            (
+                PluginError::IdpInvalidResponse("unsupported token type: mac".into()),
+                "auth plugin: identity provider sent an invalid response",
+                "unsupported token type: mac",
+            ),
+        ];
+        let mut checks = Vec::new();
+        for (plugin_err, message, detail) in cases {
+            let err = auth_plugin_error(plugin_err, "/i", scope);
+            for _ in 0..3 {
+                let _ = CanonicalError::from(err.clone());
+            }
+            checks.push((message, detail));
+        }
+
+        logs_assert(|lines: &[&str]| {
+            for (message, detail) in &checks {
+                let warns: Vec<_> = lines
+                    .iter()
+                    .filter(|l| l.contains(" WARN ") && l.contains(detail))
+                    .collect();
+                match warns.as_slice() {
+                    [line]
+                        if line.contains(message)
+                            && line.contains("upstream_alias=\"idp-upstream\"")
+                            && line.contains("plugin=\"oauth2-test\"") => {}
+                    other => {
+                        return Err(format!(
+                            "expected one warn {message:?} with the scope, got {other:#?}"
+                        ));
+                    }
+                }
+                assert_log_count(lines, message, 1)?;
+            }
+            Ok(())
+        });
     }
 
     /// The auth plugin sets only its own header. Repeated client headers and
@@ -3753,7 +4556,7 @@ mod tests {
             )),
         );
         let (upstream, _) = apikey_target("cred://k");
-        let auth = upstream.auth.unwrap();
+        let auth = upstream.auth.clone().unwrap();
 
         let raw = HeaderValue::from_bytes(b"caf\xe9").unwrap();
         let mut headers = HeaderMap::new();
@@ -3763,9 +4566,16 @@ mod tests {
         headers.append("authorization", HeaderValue::from_static("Bearer client-1"));
         headers.append("authorization", HeaderValue::from_static("Bearer client-2"));
 
-        execute_auth_plugin(&svc.auth_registry, &auth, &mut headers, &test_ctx(), "/i")
-            .await
-            .unwrap();
+        execute_auth_plugin(
+            &svc.auth_registry,
+            &upstream,
+            &auth,
+            &mut headers,
+            &test_ctx(),
+            "/i",
+        )
+        .await
+        .unwrap();
 
         let multi: Vec<_> = headers.get_all("x-multi").iter().collect();
         assert_eq!(multi, ["a", "b"]);
@@ -3773,6 +4583,16 @@ mod tests {
         let auth_lines: Vec<_> = headers.get_all("authorization").iter().collect();
         assert_eq!(auth_lines, ["Bearer sk-1"]);
         assert!(auth_lines[0].is_sensitive());
+    }
+
+    /// A scope for calling `auth_plugin_error` directly.
+    fn test_auth_scope() -> AuthScope<'static> {
+        AuthScope {
+            caller_tenant_id: uuid::Uuid::nil(),
+            upstream_id: uuid::Uuid::nil(),
+            upstream_alias: "test",
+            plugin_type: "test",
+        }
     }
 
     /// A header the plugin cannot set fails the request instead of sending
@@ -3796,14 +4616,92 @@ mod tests {
         assert!(!msg.contains("sk-1"), "{msg}");
         assert!(headers.is_empty(), "{headers:?}");
 
-        match auth_plugin_error(err, "/i") {
-            DomainError::Validation {
-                field: f, reason, ..
-            } => {
-                assert_eq!(f, "plugin");
-                assert_eq!(reason, field::INVALID_PLUGIN_CONFIG);
+        match auth_plugin_error(err, "/i", test_auth_scope()) {
+            DomainError::Internal { message } => {
+                assert!(message.contains("authorization"), "{message}");
+                assert!(!message.contains("sk-1"), "{message}");
             }
-            other => panic!("expected a plugin config error, got {other:?}"),
+            other => panic!("expected a misconfiguration (internal), got {other:?}"),
+        }
+    }
+
+    /// Every auth plugin error goes through one mapping, whichever plugin
+    /// raised it: the status and reason the REST layer sends for each.
+    #[test]
+    fn auth_plugin_errors_have_one_mapping() {
+        use oagw_sdk::reason::{auth, unavailable};
+        use std::time::Duration;
+        use toolkit_canonical_errors::{CanonicalError, Problem};
+
+        let cases: Vec<(PluginError, u16, Option<&str>)> = vec![
+            (
+                PluginError::SecretNotFound {
+                    key: "secret_ref",
+                    kind: "secret not found",
+                },
+                401,
+                Some(auth::CREDENTIAL_NOT_FOUND),
+            ),
+            (
+                PluginError::CredentialStoreUnavailable {
+                    detail: "credential store unavailable for auth.config.secret_ref".into(),
+                    retry_after: Some(Duration::from_secs(9)),
+                },
+                503,
+                Some(unavailable::CREDENTIAL_STORE_UNAVAILABLE),
+            ),
+            (
+                PluginError::IdpUnavailable("token endpoint returned 503".into()),
+                503,
+                Some(unavailable::IDENTITY_PROVIDER_UNAVAILABLE),
+            ),
+            (
+                PluginError::IdpInvalidResponse("unsupported token type: mac".into()),
+                502,
+                Some(unavailable::REQUEST_NOT_SENT),
+            ),
+            (
+                PluginError::AuthFailed("identity provider rejected the client".into()),
+                401,
+                Some(auth::PLUGIN_FAILED),
+            ),
+            (
+                PluginError::Rejected("refused".into()),
+                401,
+                Some(auth::PLUGIN_FAILED),
+            ),
+            (
+                PluginError::InvalidConfig("missing client_id_ref".into()),
+                500,
+                None,
+            ),
+            (
+                PluginError::InvalidRequest {
+                    field: "body",
+                    detail: "a streamed request body cannot be hashed".into(),
+                },
+                400,
+                None,
+            ),
+            (
+                PluginError::Internal("secret value is not valid UTF-8".into()),
+                401,
+                Some(auth::PLUGIN_INTERNAL),
+            ),
+        ];
+        for (err, status, reason) in cases {
+            let label = format!("{err:?}");
+            let problem = Problem::from(CanonicalError::from(auth_plugin_error(
+                err,
+                "/i",
+                test_auth_scope(),
+            )));
+            assert_eq!(problem.status, Some(status), "{label}");
+            assert_eq!(
+                problem.context.get("reason").and_then(|r| r.as_str()),
+                reason,
+                "{label}"
+            );
         }
     }
 
@@ -3823,16 +4721,23 @@ mod tests {
             )),
         );
         let (upstream, _) = apikey_target("cred://k");
-        let auth = upstream.auth.unwrap();
+        let auth = upstream.auth.clone().unwrap();
 
         let raw = HeaderValue::from_bytes(b"caf\xe9").unwrap();
         let mut headers = HeaderMap::new();
         headers.append("x-multi", HeaderValue::from_static("a"));
         headers.append("x-multi", HeaderValue::from_static("b"));
         headers.insert("x-raw", raw.clone());
-        execute_auth_plugin(&svc.auth_registry, &auth, &mut headers, &test_ctx(), "/i")
-            .await
-            .unwrap();
+        execute_auth_plugin(
+            &svc.auth_registry,
+            &upstream,
+            &auth,
+            &mut headers,
+            &test_ctx(),
+            "/i",
+        )
+        .await
+        .unwrap();
 
         let request_id = crate::domain::model::PluginBinding {
             plugin_ref: crate::domain::gts_helpers::REQUEST_ID_TRANSFORM_PLUGIN_ID.into(),
@@ -3959,8 +4864,17 @@ mod tests {
             sharing: SharingMode::Private,
             config: None,
         };
-        match execute_auth_plugin(&svc.auth_registry, &auth, &mut HeaderMap::new(), &ctx, "/i")
-            .await
+        let (upstream, _) = apikey_target("cred://k");
+        match execute_auth_plugin(
+            &svc.auth_registry,
+            &upstream,
+            &auth,
+            &mut HeaderMap::new(),
+            &ctx,
+            "/i",
+        )
+        .await
+        .map(|_| ())
         {
             Err(DomainError::AuthenticationFailed { reason: r, .. }) => {
                 assert_eq!(r, reason::auth::PLUGIN_NOT_FOUND);
@@ -4053,14 +4967,798 @@ mod tests {
         let mut svc =
             build_svc_with_decision(Arc::new(MockSelector::new()), metrics.clone(), None, true);
         svc.policy_enforcer = PolicyEnforcer::new(Arc::new(NeverAnswers));
-        let timed_out =
-            tokio::time::timeout(Duration::from_millis(20), svc.authorize_proxy(test_ctx())).await;
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(20),
+            svc.authorize_proxy(test_ctx(), &http::Method::GET),
+        )
+        .await;
+        assert!(timed_out.is_err());
+        // No status: the client got no response.
+        assert_eq!(
+            metrics.events(),
+            ["duration total", "error unknown Cancelled"]
+        );
+    }
+
+    /// A grant dropped before it is proxied or rejected counts its request
+    /// as `Cancelled`, with no status; one handed to the proxy or to
+    /// `reject_granted` counts nothing more on drop.
+    #[tokio::test]
+    async fn a_dropped_grant_is_counted_as_cancelled() {
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc =
+            build_svc_with_decision(Arc::new(MockSelector::new()), metrics.clone(), None, true);
+        let grant = svc
+            .authorize_proxy(test_ctx(), &http::Method::GET)
+            .await
+            .unwrap();
+        drop(grant);
+        assert_eq!(
+            metrics.events(),
+            ["duration total", "error unknown Cancelled"]
+        );
+
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc =
+            build_svc_with_decision(Arc::new(MockSelector::new()), metrics.clone(), None, true);
+        let grant = svc
+            .authorize_proxy(test_ctx(), &http::Method::POST)
+            .await
+            .unwrap();
+        svc.reject_granted(
+            grant,
+            &DomainError::PayloadTooLarge {
+                detail: "too large".into(),
+                instance: String::new(),
+            },
+        );
+        assert_eq!(
+            metrics.events(),
+            [
+                "duration total",
+                "request unknown POST 413",
+                "error unknown PayloadTooLarge",
+            ]
+        );
+
+        // A grant without a count (the SDK path, tests) counts nothing.
+        drop(ProxyGrant::for_tests(test_ctx()));
+    }
+
+    /// A gateway error is counted in `requests_total` with the status the
+    /// client gets, next to `errors_total`. The request is in flight from
+    /// the start, under `unknown` until the upstream is resolved (#4989).
+    #[tokio::test]
+    async fn gateway_errors_are_counted_with_their_status() {
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc = build_svc_resolving(Arc::new(MockSelector::new()), metrics.clone(), None);
+        let err = svc
+            .proxy_request(test_ctx(), proxy_get("/missing/v1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::NotFound { .. }), "{err:?}");
+        assert_eq!(
+            metrics.events(),
+            [
+                "in_flight +1 unknown",
+                "duration resolve",
+                "in_flight -1 unknown",
+                "duration total",
+                "request unknown GET 404",
+                "error unknown NotFound",
+            ]
+        );
+
+        // Failing after resolution: counted under the upstream's alias.
+        let (upstream, route) = local_target(1);
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc = build_svc_resolving(
+            Arc::new(MockSelector::new()),
+            metrics.clone(),
+            Some((upstream, route)),
+        );
+        let err = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1?x=1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DomainError::Validation { .. }), "{err:?}");
+        assert_eq!(
+            metrics.events(),
+            [
+                "in_flight +1 unknown",
+                "in_flight +1 test",
+                "in_flight -1 unknown",
+                "duration resolve",
+                "in_flight -1 test",
+                "duration total",
+                "request test GET 400",
+                "error test ValidationError",
+            ]
+        );
+    }
+
+    /// An HTTP upstream on 127.0.0.1:`port` with a `GET /v1` route.
+    fn local_target(port: u16) -> (Upstream, crate::domain::model::Route) {
+        use crate::domain::model::{HttpMatch, HttpMethod, MatchRules, Route};
+        let upstream = upstream_with(vec![Endpoint {
+            scheme: Scheme::Http,
+            host: "127.0.0.1".into(),
+            port,
+        }]);
+        let route = Route {
+            id: Uuid::new_v4(),
+            tenant_id: upstream.tenant_id,
+            upstream_id: upstream.id,
+            match_rules: MatchRules {
+                http: Some(HttpMatch {
+                    methods: vec![HttpMethod::Get],
+                    path: "/v1".into(),
+                    query_allowlist: vec![],
+                    path_suffix_mode: PathSuffixMode::Append,
+                }),
+                grpc: None,
+            },
+            plugins: None,
+            rate_limit: None,
+            cors: None,
+            tags: vec![],
+            priority: 0,
+            enabled: true,
+            managed_by: ManagedBy::Api,
+        };
+        (upstream, route)
+    }
+
+    /// A one-request HTTP/1.1 upstream on 127.0.0.1. After the request head
+    /// it writes each part sent on the returned channel, and closes the
+    /// connection once the channel closes.
+    async fn raw_upstream() -> (u16, tokio::sync::mpsc::UnboundedSender<&'static [u8]>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<&'static [u8]>();
+        tokio::spawn(async move {
+            let Ok((mut tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match tcp.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            while let Some(part) = rx.recv().await {
+                if tcp.write_all(part).await.is_err() {
+                    return;
+                }
+            }
+            let _ = tcp.shutdown().await;
+        });
+        (port, tx)
+    }
+
+    /// An HTTP/1.1 upstream on 127.0.0.1 that reads each request head and
+    /// closes the connection without a response. It keeps listening, so a
+    /// retry cannot reach another test's listener on a reused port.
+    async fn closing_upstream() -> u16 {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match tcp.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+            }
+        });
+        port
+    }
+
+    /// A service proxying `/test/v1` to the raw upstream on `port`.
+    fn local_svc(port: u16, metrics: Arc<dyn OagwMetricsPort>) -> DataPlaneServiceImpl {
+        build_svc_resolving(
+            Arc::new(MockSelector::new()),
+            metrics,
+            Some(local_target(port)),
+        )
+        .with_allow_http_upstream(true)
+    }
+
+    /// An endpoint selection that does not answer by the request deadline
+    /// is a 504 that tells the client nothing was sent
+    /// (`REQUEST_NOT_SENT`), so any method may be retried.
+    #[tokio::test]
+    async fn a_hung_endpoint_selection_times_out_as_not_sent() {
+        use oagw_sdk::ServiceGatewayError;
+        use oagw_sdk::reason::timeout::TimeoutReason;
+        use toolkit_canonical_errors::CanonicalError;
+
+        struct Hangs;
+        #[async_trait]
+        impl EndpointSelector for Hangs {
+            async fn select(
+                &self,
+                _upstream_id: Uuid,
+                _endpoints: &[Endpoint],
+            ) -> Result<SelectedEndpoint, SelectionError> {
+                std::future::pending().await
+            }
+
+            fn invalidate(&self, _upstream_id: Uuid) {}
+        }
+
+        // Two endpoints, so the selector is asked.
+        let (mut upstream, route) = local_target(1);
+        upstream.server.endpoints.push(Endpoint {
+            scheme: Scheme::Http,
+            host: "127.0.0.2".into(),
+            port: 1,
+        });
+        let svc = build_svc_resolving(
+            Arc::new(Hangs),
+            Arc::new(crate::domain::ports::NoopMetrics),
+            Some((upstream, route)),
+        )
+        .with_allow_http_upstream(true)
+        .with_request_timeout(Duration::from_millis(50));
+        let err = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                DomainError::RequestTimeout {
+                    dispatch: Dispatch::NotSent,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        let canonical = CanonicalError::from(err);
+        assert_eq!(canonical.status_code(), 504);
+        assert!(
+            matches!(
+                ServiceGatewayError::from(canonical),
+                ServiceGatewayError::Timeout {
+                    reason: Some(TimeoutReason::RequestNotSent)
+                }
+            ),
+            "selection timeout"
+        );
+    }
+
+    const CHUNKED_HEAD: &[u8] =
+        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n";
+
+    /// The events recorded when the response head of a resolved `GET` came
+    /// back with `status`, its body still open.
+    fn head_events(status: u16) -> Vec<String> {
+        [
+            "in_flight +1 unknown",
+            "in_flight +1 test",
+            "in_flight -1 unknown",
+            "duration resolve",
+            "duration total",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([format!("request test GET {status}")])
+        .collect()
+    }
+
+    fn body_stream(resp: http::Response<Body>) -> BodyStream {
+        match resp.into_body() {
+            Body::Stream(stream) => stream,
+            other => panic!("expected a streamed body, got {other:?}"),
+        }
+    }
+
+    /// A request stays in flight until its body ends, and the stream
+    /// duration is recorded then, as `completed`; the duration to the head
+    /// and `requests_total` are recorded when the head returns (#4989, #4987).
+    #[tokio::test]
+    async fn in_flight_lasts_until_the_body_ends() {
+        let (port, upstream) = raw_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc = local_svc(port, metrics.clone());
+        upstream.send(CHUNKED_HEAD).unwrap();
+
+        let resp = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        let mut body = body_stream(resp);
+        assert_eq!(body.next().await.unwrap().unwrap(), "hello");
+        assert_eq!(metrics.events(), head_events(200));
+
+        upstream.send(b"0\r\n\r\n").unwrap();
+        assert!(body.next().await.is_none());
+        let mut expected = head_events(200);
+        expected.extend([
+            "stream test completed".to_owned(),
+            "in_flight -1 test".to_owned(),
+        ]);
+        assert_eq!(metrics.events(), expected);
+        drop(body);
+        assert_eq!(metrics.events(), expected, "recorded once");
+    }
+
+    /// A body the upstream cuts ends as `error`; an SSE stream the gateway's
+    /// stop ends as `shutdown`; a body dropped before its end (the client
+    /// went away) as `cancelled`. Each leaves the in-flight gauge then
+    /// (#4987).
+    #[tokio::test]
+    async fn stream_outcome_is_recorded_when_the_body_ends() {
+        // The upstream closes the connection mid-body.
+        let (port, upstream) = raw_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc = local_svc(port, metrics.clone());
+        upstream.send(CHUNKED_HEAD).unwrap();
+        let resp = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1"))
+            .await
+            .unwrap();
+        let mut body = body_stream(resp);
+        assert_eq!(body.next().await.unwrap().unwrap(), "hello");
+        drop(upstream);
+        assert!(matches!(body.next().await, Some(Err(_))));
+        let mut expected = head_events(200);
+        expected.extend([
+            "stream test error".to_owned(),
+            "in_flight -1 test".to_owned(),
+        ]);
+        assert_eq!(metrics.events(), expected);
+
+        // The gateway stops under an open SSE stream.
+        let (port, upstream) = raw_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc = local_svc(port, metrics.clone());
+        upstream
+            .send(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                  transfer-encoding: chunked\r\n\r\nb\r\ndata: one\n\n\r\n",
+            )
+            .unwrap();
+        let resp = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1"))
+            .await
+            .unwrap();
+        let mut body = body_stream(resp);
+        assert_eq!(body.next().await.unwrap().unwrap(), "data: one\n\n");
+        svc.stream_shutdown().end_streams();
+        crate::infra::proxy::streaming::tests::assert_shutdown_error(body.next().await);
+        let mut expected = head_events(200);
+        expected.extend([
+            "stream test shutdown".to_owned(),
+            "in_flight -1 test".to_owned(),
+        ]);
+        assert_eq!(metrics.events(), expected);
+
+        // The client goes away before the body ends.
+        let (port, upstream) = raw_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc = local_svc(port, metrics.clone());
+        upstream.send(CHUNKED_HEAD).unwrap();
+        let resp = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1"))
+            .await
+            .unwrap();
+        drop(resp);
+        let mut expected = head_events(200);
+        expected.extend([
+            "stream test cancelled".to_owned(),
+            "in_flight -1 test".to_owned(),
+        ]);
+        assert_eq!(metrics.events(), expected);
+    }
+
+    /// A response without a body (204, 304, an answer to HEAD) ends at its
+    /// head and records no stream duration: hyper never reads its body,
+    /// which would otherwise end as `cancelled`.
+    #[tokio::test]
+    async fn a_response_without_a_body_ends_at_its_head() {
+        let cases: [(http::Method, &'static [u8], u16); 3] = [
+            (http::Method::GET, b"HTTP/1.1 204 No Content\r\n\r\n", 204),
+            (http::Method::GET, b"HTTP/1.1 304 Not Modified\r\n\r\n", 304),
+            (
+                http::Method::HEAD,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\n",
+                200,
+            ),
+        ];
+        for (method, head, status) in cases {
+            let (port, upstream) = raw_upstream().await;
+            let metrics = Arc::new(RequestRecorder::default());
+            let svc = local_svc(port, metrics.clone());
+            upstream.send(head).unwrap();
+            let req = http::Request::builder()
+                .method(method.clone())
+                .uri("/test/v1")
+                .body(Body::Empty)
+                .unwrap();
+            let resp = svc.proxy_request(test_ctx(), req).await.unwrap();
+            assert_eq!(resp.status().as_u16(), status);
+            let expected = [
+                "in_flight +1 unknown".to_owned(),
+                "in_flight +1 test".to_owned(),
+                "in_flight -1 unknown".to_owned(),
+                "duration resolve".to_owned(),
+                "in_flight -1 test".to_owned(),
+                "duration total".to_owned(),
+                format!("request test {method} {status}"),
+            ];
+            assert_eq!(metrics.events(), expected, "{method} {status}");
+            drop(resp);
+            assert_eq!(metrics.events(), expected, "nothing more at the drop");
+        }
+    }
+
+    /// A request dropped after resolution, before the response head (the
+    /// client went away), leaves the in-flight gauge balanced and counts
+    /// only as `Cancelled`: no status, as the client got none (#4989).
+    #[tokio::test]
+    async fn a_request_dropped_before_its_head_is_cancelled() {
+        // The upstream reads the request and never answers.
+        let (port, _upstream) = raw_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let svc = local_svc(port, metrics.clone());
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(50),
+            svc.proxy_request(test_ctx(), proxy_get("/test/v1")),
+        )
+        .await;
         assert!(timed_out.is_err());
         assert_eq!(
             metrics.events(),
-            vec![
-                format!("duration {}", phase::TOTAL),
-                "error Cancelled".to_owned()
+            [
+                "in_flight +1 unknown",
+                "in_flight +1 test",
+                "in_flight -1 unknown",
+                "duration resolve",
+                "in_flight -1 test",
+                "duration total",
+                "error test Cancelled",
+            ]
+        );
+    }
+
+    /// A gateway recording into `metrics`, with the upstream `test` on
+    /// 127.0.0.1:`port` and its `GET /v1` route, served over HTTP/1.1 by
+    /// hyper on the returned address, so requests go through the REST
+    /// handler as in production.
+    async fn served_gateway(
+        port: u16,
+        metrics: Arc<RequestRecorder>,
+    ) -> (crate::test_support::AppHarness, std::net::SocketAddr) {
+        use oagw_sdk::{CreateRouteRequest, CreateUpstreamRequest, HttpMatch, MatchRules};
+        let h = crate::test_support::AppHarness::builder()
+            .with_metrics(metrics)
+            .with_max_body_size(8)
+            .build()
+            .await;
+        let ctx = h.security_context().clone();
+        let upstream = h
+            .facade()
+            .create_upstream(
+                ctx.clone(),
+                CreateUpstreamRequest::builder(
+                    oagw_sdk::Server {
+                        endpoints: vec![oagw_sdk::Endpoint {
+                            scheme: oagw_sdk::Scheme::Http,
+                            host: "127.0.0.1".into(),
+                            port,
+                        }],
+                    },
+                    oagw_sdk::HTTP_PROTOCOL_ID,
+                )
+                .alias("test")
+                .build(),
+            )
+            .await
+            .unwrap();
+        h.facade()
+            .create_route(
+                ctx,
+                CreateRouteRequest::builder(
+                    upstream.id,
+                    MatchRules {
+                        http: Some(HttpMatch {
+                            methods: vec![oagw_sdk::HttpMethod::Get, oagw_sdk::HttpMethod::Post],
+                            path: "/v1".into(),
+                            query_allowlist: vec![],
+                            path_suffix_mode: oagw_sdk::PathSuffixMode::Append,
+                        }),
+                        grpc: None,
+                    },
+                )
+                .build(),
+            )
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = h.router().clone();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        (h, addr)
+    }
+
+    /// Sends `req` over HTTP/1.1 to `addr`: the response status and its
+    /// whole body.
+    async fn http1_send(
+        addr: std::net::SocketAddr,
+        req: http::Request<http_body_util::Full<Bytes>>,
+    ) -> (http::StatusCode, Bytes) {
+        use http_body_util::BodyExt as _;
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp))
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+        let resp = sender.send_request(req).await.unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, body)
+    }
+
+    /// The events once there are at least `n`; hyper ends the response body
+    /// after the client may have read it.
+    async fn events_after(metrics: &RequestRecorder, n: usize) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.events().len() < n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("fewer than {n} events: {:?}", metrics.events()));
+        metrics.events()
+    }
+
+    /// hyper's HTTP/1.1 server stops polling a Content-Length body once it
+    /// has written the declared bytes and drops it, without asking for its
+    /// end. Such a body still ends as `completed` (#4987).
+    #[tokio::test]
+    async fn a_content_length_body_served_by_hyper_ends_as_completed() {
+        let (port, upstream) = raw_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let (_h, addr) = served_gateway(port, metrics.clone()).await;
+        upstream
+            .send(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello")
+            .unwrap();
+
+        let req = http::Request::get("/oagw/v1/proxy/test/v1")
+            .header(http::header::HOST, addr.to_string())
+            .body(http_body_util::Full::new(Bytes::new()))
+            .unwrap();
+        let (status, body) = http1_send(addr, req).await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(body, "hello");
+
+        let mut expected = head_events(200);
+        expected.extend([
+            "stream test completed".to_owned(),
+            "in_flight -1 test".to_owned(),
+        ]);
+        assert_eq!(events_after(&metrics, expected.len()).await, expected);
+    }
+
+    /// Requests the REST handler rejects after the `proxy:invoke` grant, a
+    /// body over the limit and a path without an alias, are counted as the
+    /// Data Plane counts its gateway errors: with the status the client
+    /// gets, under the unknown host (#4989).
+    #[tokio::test]
+    async fn handler_rejections_after_the_grant_are_counted() {
+        let metrics = Arc::new(RequestRecorder::default());
+        // No request reaches the upstream.
+        let (_h, addr) = served_gateway(1, metrics.clone()).await;
+
+        let too_large = http::Request::post("/oagw/v1/proxy/test/v1")
+            .header(http::header::HOST, addr.to_string())
+            .body(http_body_util::Full::new(Bytes::from_static(
+                b"longer than eight bytes",
+            )))
+            .unwrap();
+        let (status, _) = http1_send(addr, too_large).await;
+        assert_eq!(status, http::StatusCode::PAYLOAD_TOO_LARGE);
+        let events = metrics.events();
+        assert_eq!(
+            events,
+            [
+                "duration total",
+                "request unknown POST 413",
+                "error unknown PayloadTooLarge",
+            ]
+        );
+
+        let metrics = Arc::new(RequestRecorder::default());
+        let (_h, addr) = served_gateway(1, metrics.clone()).await;
+        let no_alias = http::Request::get("/oagw/v1/proxy//v1")
+            .header(http::header::HOST, addr.to_string())
+            .body(http_body_util::Full::new(Bytes::new()))
+            .unwrap();
+        let (status, _) = http1_send(addr, no_alias).await;
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        let events = metrics.events();
+        assert_eq!(
+            events,
+            [
+                "duration total",
+                "request unknown GET 400",
+                "error unknown ValidationError",
+            ]
+        );
+    }
+
+    /// Counts the transform phases it runs.
+    #[derive(Default)]
+    struct PhaseCounter {
+        responses: AtomicUsize,
+        errors: std::sync::Mutex<Vec<u16>>,
+    }
+
+    #[async_trait]
+    impl crate::domain::plugin::TransformPlugin for PhaseCounter {
+        async fn on_response(&self, _: &mut TransformResponseContext) -> Result<(), PluginError> {
+            self.responses.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn on_error(&self, ctx: &mut TransformErrorContext) -> Result<(), PluginError> {
+            self.errors.lock().unwrap().push(ctx.status);
+            Ok(())
+        }
+    }
+
+    /// `local_svc` with the [`PhaseCounter`] transform bound to the upstream.
+    fn svc_with_phase_counter(
+        port: u16,
+        metrics: Arc<dyn OagwMetricsPort>,
+        counter: Arc<PhaseCounter>,
+    ) -> DataPlaneServiceImpl {
+        use crate::domain::model::{PluginBinding, PluginsConfig, SharingMode};
+        let plugin_ref =
+            toolkit_gts::gts_id!("cf.core.oagw.transform_plugin.v1~cf.core.oagw.phase_test.v1");
+        let (mut upstream, route) = local_target(port);
+        upstream.plugins = Some(PluginsConfig {
+            sharing: SharingMode::Private,
+            items: vec![PluginBinding {
+                plugin_ref: plugin_ref.into(),
+                config: Default::default(),
+            }],
+        });
+        let mut svc = build_svc_resolving(
+            Arc::new(MockSelector::new()),
+            metrics,
+            Some((upstream, route)),
+        )
+        .with_allow_http_upstream(true);
+        svc.transform_registry.insert(plugin_ref, counter);
+        svc
+    }
+
+    /// An upstream error response goes through `on_response`, not
+    /// `on_error`, and is counted with its status, not as an error. A
+    /// gateway error from the exchange runs `on_error` with the status the
+    /// client gets (#4989).
+    #[tokio::test]
+    async fn on_error_runs_only_for_gateway_errors() {
+        let (port, upstream) = raw_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let counter = Arc::new(PhaseCounter::default());
+        let svc = svc_with_phase_counter(port, metrics.clone(), counter.clone());
+        upstream
+            .send(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\n\r\noops")
+            .unwrap();
+        let resp = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(counter.responses.load(Ordering::SeqCst), 1);
+        let errors = counter.errors.lock().unwrap().clone();
+        assert!(errors.is_empty(), "{errors:?}");
+        let events = metrics.events();
+        assert!(
+            events.contains(&"request test GET 500".to_owned()),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|e| e.starts_with("error")), "{events:?}");
+
+        // The upstream closes the connection without a response.
+        let port = closing_upstream().await;
+        let metrics = Arc::new(RequestRecorder::default());
+        let counter = Arc::new(PhaseCounter::default());
+        let svc = svc_with_phase_counter(port, metrics.clone(), counter.clone());
+        let err = svc
+            .proxy_request(test_ctx(), proxy_get("/test/v1"))
+            .await
+            .unwrap_err();
+        let status = domain_error_status(&err);
+        assert!(status >= 500, "{err:?}");
+        assert_eq!(counter.responses.load(Ordering::SeqCst), 0);
+        let errors = counter.errors.lock().unwrap().clone();
+        assert_eq!(errors, [status]);
+        let events = metrics.events();
+        assert!(
+            events.contains(&format!("request test GET {status}")),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&format!("error test {}", domain_error_type_name(&err))),
+            "{events:?}"
+        );
+    }
+
+    /// Each rate-limit bucket writes its own series: the route, the
+    /// shadowed ancestor routes, the upstream and the shared pool. The
+    /// shadowed routes share theirs, which gets the highest ratio among them
+    /// once per request, not the last one checked (#4989).
+    #[test]
+    fn rate_limit_metrics_carry_the_bucket() {
+        use crate::domain::model::{RateLimitAlgorithm, RateLimitScope, SharedPool, Window};
+        let mut upstream = upstream_with(vec![]);
+        let mut rl = limit(10, Window::Minute, RateLimitScope::Tenant);
+        rl.shared_pool = Some(SharedPool {
+            owner_id: Uuid::new_v4(),
+            total: 5,
+            window: Window::Minute,
+            algorithm: RateLimitAlgorithm::TokenBucket,
+        });
+        upstream.rate_limit = Some(rl);
+        let route = route_on(
+            &upstream,
+            Some(limit(4, Window::Minute, RateLimitScope::Tenant)),
+        );
+        // Root first: the root is checked last, the nearer ancestor first.
+        let shadowed = [
+            ShadowedRouteLimit {
+                route_id: Uuid::new_v4(),
+                rate_limit: limit(10, Window::Minute, RateLimitScope::Tenant),
+            },
+            ShadowedRouteLimit {
+                route_id: Uuid::new_v4(),
+                rate_limit: limit(2, Window::Minute, RateLimitScope::Tenant),
+            },
+        ];
+        let ctx = test_ctx();
+        let limiter = RateLimiter::new();
+        let metrics = RequestRecorder::default();
+        let check = || {
+            check_rate_limits(
+                &limiter, &upstream, &route, &shadowed, None, &ctx, "/t", &metrics, "h", "/p",
+            )
+        };
+
+        check().unwrap();
+        check().unwrap();
+        assert!(matches!(
+            check(),
+            Err(DomainError::RateLimitExceeded { .. })
+        ));
+        assert_eq!(
+            metrics.events(),
+            [
+                "usage route 0.25",
+                "usage shadowed_route 0.5",
+                "usage upstream 0.1",
+                "usage pool 0.2",
+                "usage route 0.5",
+                "usage shadowed_route 1",
+                "usage upstream 0.2",
+                "usage pool 0.4",
+                "usage route 0.75",
+                "exceeded shadowed_route",
+                "usage shadowed_route 1",
             ]
         );
     }
@@ -4110,11 +5808,38 @@ mod tests {
         fn record_request_duration_seconds(&self, _: &str, _: &str, _: &str, _: f64) {}
         fn increment_in_flight(&self, _: &str) {}
         fn decrement_in_flight(&self, _: &str) {}
-        fn record_rate_limit_exceeded(&self, _: &str, _: &str) {}
-        fn record_rate_limit_usage_ratio(&self, _: &str, _: &str, _: f64) {}
+        fn record_rate_limit_exceeded(
+            &self,
+            _: &str,
+            _: &str,
+            _: crate::domain::ports::metric_labels::RateLimitBucket,
+        ) {
+        }
+        fn record_rate_limit_usage_ratio(
+            &self,
+            _: &str,
+            _: &str,
+            _: crate::domain::ports::metric_labels::RateLimitBucket,
+            _: f64,
+        ) {
+        }
         fn increment_active_websocket_sessions(&self, _: &str) {}
         fn decrement_active_websocket_sessions(&self, _: &str) {}
-        fn record_websocket_session_duration_seconds(&self, _: &str, _: f64) {}
+        fn record_websocket_session_duration_seconds(
+            &self,
+            _: &str,
+            _: crate::domain::ports::metric_labels::StreamOutcome,
+            _: f64,
+        ) {
+        }
+        fn record_stream_duration_seconds(
+            &self,
+            _: &str,
+            _: &str,
+            _: crate::domain::ports::metric_labels::StreamOutcome,
+            _: f64,
+        ) {
+        }
         fn record_rate_limit_sweep(&self, evicted: u64, live: u64) {
             self.0.lock().unwrap().push((evicted, live));
         }
@@ -4172,25 +5897,58 @@ mod tests {
             .unwrap();
         // The limiter reads the real clock: let the fast bucket refill.
         std::thread::sleep(Duration::from_millis(5));
-        let half = RATE_LIMIT_SWEEP_INTERVAL / 2;
+        let half = IDLE_SWEEP_INTERVAL / 2;
         let cancel = CancellationToken::new();
-        svc.spawn_rate_limit_sweeper(cancel.clone());
+        svc.spawn_idle_sweeper(cancel.clone());
 
         // Ticks fire at 0 and at one interval; each sleep ends between ticks.
         tokio::time::sleep(half).await;
-        tokio::time::sleep(RATE_LIMIT_SWEEP_INTERVAL).await;
+        tokio::time::sleep(IDLE_SWEEP_INTERVAL).await;
         assert_eq!(*metrics.0.lock().unwrap(), vec![(1, 1), (0, 1)]);
 
         cancel.cancel();
-        tokio::time::sleep(RATE_LIMIT_SWEEP_INTERVAL * 3).await;
+        tokio::time::sleep(IDLE_SWEEP_INTERVAL * 3).await;
         assert_eq!(metrics.0.lock().unwrap().len(), 2, "no tick after cancel");
+    }
+
+    /// The same sweep evicts circuit breakers idle past their timeout.
+    #[tokio::test(start_paused = true)]
+    async fn sweep_evicts_idle_circuit_breakers() {
+        let mut upstream = upstream_with(vec![ep("10.0.0.1", 443)]);
+        upstream.circuit_breaker = Some(crate::domain::model::CircuitBreakerConfig {
+            sharing: Default::default(),
+            enabled: true,
+            failure_threshold: 1,
+            timeout_seconds: 1,
+            success_threshold: 1,
+            owner_id: None,
+        });
+        let limiter = Arc::new(RateLimiter::new());
+        let breakers = Arc::new(CircuitBreakers::new());
+        breakers
+            .admit(&upstream, "/")
+            .unwrap()
+            .answered(http::StatusCode::SERVICE_UNAVAILABLE);
+        let sweep = tokio::spawn(sweep_idle_state(
+            Arc::downgrade(&limiter),
+            Arc::downgrade(&breakers),
+            Arc::new(crate::domain::ports::NoopMetrics),
+            IDLE_SWEEP_INTERVAL,
+            CancellationToken::new(),
+        ));
+        tokio::time::sleep(IDLE_SWEEP_INTERVAL * 5).await;
+        assert_eq!(breakers.len(), 1, "idle for less than the grace");
+        tokio::time::sleep(IDLE_SWEEP_INTERVAL * 7).await;
+        assert_eq!(breakers.len(), 0);
+        sweep.abort();
     }
 
     #[tokio::test]
     async fn sweep_ends_when_the_limiter_is_dropped() {
         let limiter = Arc::new(RateLimiter::new());
-        let sweep = tokio::spawn(sweep_rate_limits(
+        let sweep = tokio::spawn(sweep_idle_state(
             Arc::downgrade(&limiter),
+            Weak::new(),
             Arc::new(crate::domain::ports::NoopMetrics),
             Duration::from_millis(5),
             CancellationToken::new(),

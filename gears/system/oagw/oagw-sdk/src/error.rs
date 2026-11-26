@@ -58,8 +58,9 @@
 //!
 //! match err {
 //!     ServiceGatewayError::RateLimited { retry_after_secs } => /* backoff */,
-//!     ServiceGatewayError::Timeout => /* retry */,
-//!     ServiceGatewayError::Unavailable { retry_after_secs } => /* retry */,
+//!     e if e.request_not_sent() => /* nothing reached the upstream: retry any method */,
+//!     ServiceGatewayError::Timeout { .. } => /* retry if idempotent */,
+//!     ServiceGatewayError::Unavailable { retry_after_secs, .. } => /* retry if idempotent */,
 //!     ServiceGatewayError::AuthFailed { reason: FailureReason::PluginInternal, .. } =>
 //!         /* gateway-side auth machinery broken — transient */,
 //!     ServiceGatewayError::AuthFailed { .. } => /* creds rejected */,
@@ -77,6 +78,8 @@ use crate::field::{SecretRefCode, TargetHostCode};
 use crate::gts::Resource;
 use crate::reason::auth::FailureReason as AuthFailureReason;
 use crate::reason::permission::DenialReason as PermissionDenialReason;
+use crate::reason::timeout::TimeoutReason;
+use crate::reason::unavailable::UnavailableReason;
 
 /// Typed projection of [`CanonicalError`] for OAGW consumers.
 ///
@@ -99,15 +102,30 @@ pub enum ServiceGatewayError {
     RateLimited { retry_after_secs: Option<u64> },
 
     /// Connection / request / idle timeout. Retry usually helps.
+    ///
+    /// `reason` tells whether the request may have reached the upstream
+    /// ([`TimeoutReason::RequestMayHaveBeenSent`]) or not
+    /// ([`TimeoutReason::RequestNotSent`]); `None` when the canonical
+    /// context carries no reason.
     #[error("request timed out")]
-    Timeout,
+    Timeout { reason: Option<TimeoutReason> },
 
-    /// Upstream broken, disabled, or circuit-breaker open.
-    /// `retry_after_secs` carries the gateway's recommended backoff
-    /// (the same value the wire `Retry-After` header carries on REST
-    /// responses).
+    /// Upstream broken, disabled, circuit-breaker open, the credential
+    /// store unavailable, or the OAuth2 identity provider unavailable. `retry_after_secs`
+    /// carries the gateway's recommended backoff (the same value the wire
+    /// `Retry-After` header carries on REST responses).
+    ///
+    /// `reason` says why: whether the request may have reached the
+    /// upstream, the upstream is disabled, the credential store is down, or
+    /// the OAuth2 identity provider is down (see [`crate::reason::unavailable`]);
+    /// `None` when the canonical context carries no reason (for example a
+    /// guard plugin's 5xx). To decide whether a retry is safe, use
+    /// [`Self::request_not_sent`] rather than matching reasons.
     #[error("service unavailable")]
-    Unavailable { retry_after_secs: Option<u64> },
+    Unavailable {
+        retry_after_secs: Option<u64>,
+        reason: Option<UnavailableReason>,
+    },
 
     // ─── Auth ─────────────────────────────────────────────────────────
     /// Authentication failed. Inspect `reason` to disposition between
@@ -200,7 +218,11 @@ pub enum ServiceGatewayError {
         /// plugin's `error_code`, a credential key
         /// ([`crate::precondition::SECRET_REF`],
         /// [`crate::precondition::CLIENT_ID_REF`],
-        /// [`crate::precondition::CLIENT_SECRET_REF`]), or
+        /// [`crate::precondition::CLIENT_SECRET_REF`],
+        /// [`crate::precondition::ACCESS_KEY_ID_REF`],
+        /// [`crate::precondition::SECRET_ACCESS_KEY_REF`],
+        /// [`crate::precondition::SESSION_TOKEN_REF`],
+        /// [`crate::precondition::PRIVATE_KEY_REF`]), or
         /// [`crate::precondition::MANAGED_BY`].
         subject: String,
         detail: String,
@@ -242,6 +264,31 @@ pub enum ServiceGatewayError {
     Other { canonical: CanonicalError },
 }
 
+impl ServiceGatewayError {
+    /// The gateway says the request never reached the upstream, so a
+    /// retry is safe for any method, a non-idempotent one included.
+    ///
+    /// `false` when the request may have reached the upstream and when the
+    /// gateway did not say: an unknown or missing reason, or any other
+    /// variant. Then retry only an idempotent request.
+    #[must_use]
+    pub fn request_not_sent(&self) -> bool {
+        match self {
+            Self::Timeout { reason } => matches!(reason, Some(TimeoutReason::RequestNotSent)),
+            Self::Unavailable { reason, .. } => matches!(
+                reason,
+                Some(
+                    UnavailableReason::RequestNotSent
+                        | UnavailableReason::UpstreamDisabled
+                        | UnavailableReason::CredentialStoreUnavailable
+                        | UnavailableReason::IdentityProviderUnavailable
+                )
+            ),
+            _ => false,
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // CanonicalError → ServiceGatewayError projection
 //
@@ -267,10 +314,13 @@ impl From<CanonicalError> for ServiceGatewayError {
                 retry_after_secs: err.retry_after_seconds(),
             },
 
-            CanonicalError::DeadlineExceeded { .. } => Self::Timeout,
+            CanonicalError::DeadlineExceeded { ctx, .. } => Self::Timeout {
+                reason: wire_reason(ctx.reason.as_deref()).map(TimeoutReason::from_wire),
+            },
 
-            CanonicalError::ServiceUnavailable { .. } => Self::Unavailable {
+            CanonicalError::ServiceUnavailable { ctx, .. } => Self::Unavailable {
                 retry_after_secs: err.retry_after_seconds(),
+                reason: wire_reason(ctx.reason.as_deref()).map(UnavailableReason::from_wire),
             },
 
             CanonicalError::Unauthenticated { ctx, .. } => Self::AuthFailed {
@@ -340,6 +390,13 @@ impl From<CanonicalError> for ServiceGatewayError {
     }
 }
 
+/// A context `reason`, with an empty string read as none, as the canonical
+/// builders and deserializer do; a context built in process can still hold
+/// `Some("")`.
+fn wire_reason(reason: Option<&str>) -> Option<&str> {
+    reason.filter(|r| !r.is_empty())
+}
+
 fn project_invalid_argument(ctx: &InvalidArgument, detail: String) -> ServiceGatewayError {
     let first_violation = match ctx {
         InvalidArgument::FieldViolations { field_violations } => field_violations.first(),
@@ -396,6 +453,7 @@ fn project_invalid_argument(ctx: &InvalidArgument, detail: String) -> ServiceGat
 /// inside the SDK's own SSE/WebSocket decoders that never cross a wire
 /// boundary as an OAGW response.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StreamingError {
     /// SSE parse error — a chunk could not be decoded as UTF-8.
     #[error("SSE parse error: {detail}")]
@@ -410,6 +468,20 @@ pub enum StreamingError {
     /// the request is, ideally on another replica.
     #[error("the gateway closed the stream because it is stopping")]
     ClosedByGateway,
+
+    /// The gateway cut the stream because the upstream sent nothing for the
+    /// configured streaming idle timeout. The response is incomplete.
+    #[error("the gateway closed the stream after the upstream was idle too long")]
+    IdleTimeout,
+
+    /// An SSE event, or the data buffered for it before the blank line that
+    /// ends it, is over the limit: [`crate::sse::DEFAULT_MAX_EVENT_BYTES`], or the
+    /// one passed to
+    /// [`ServerEventsStream::from_response_with_max_event_bytes`](crate::sse::ServerEventsStream::from_response_with_max_event_bytes).
+    /// The stream ends: the upstream is not framing events, or an event is
+    /// larger than the caller accepts.
+    #[error("SSE event exceeds the limit of {limit} bytes")]
+    EventTooLarge { limit: usize },
 
     /// WebSocket connection to upstream failed.
     #[error("WebSocket connect error: {detail}")]
@@ -436,10 +508,29 @@ impl StreamClosedByGateway {
     }
 }
 
+/// The body error the gateway ends a streamed (SSE) response with when the
+/// upstream stays silent for the streaming idle timeout. SDK readers see it
+/// as [`StreamingError::IdleTimeout`]; a raw body consumer can `downcast_ref`
+/// it.
+#[derive(Debug, Clone, Default, thiserror::Error)]
+#[error("the gateway closed the stream after the upstream was idle too long")]
+#[non_exhaustive]
+pub struct StreamIdleTimeout;
+
+impl StreamIdleTimeout {
+    /// The error for a stream the gateway cut on its idle timeout.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 impl From<Box<dyn std::error::Error + Send + Sync>> for StreamingError {
     fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
         if e.is::<StreamClosedByGateway>() {
             Self::ClosedByGateway
+        } else if e.is::<StreamIdleTimeout>() {
+            Self::IdleTimeout
         } else {
             Self::Stream(e)
         }
@@ -476,12 +567,51 @@ mod sdk_vocabulary_round_trip_tests {
             reason::auth::PLUGIN_NOT_FOUND,
             reason::auth::PLUGIN_FAILED,
             reason::auth::PLUGIN_INTERNAL,
+            reason::auth::CREDENTIAL_NOT_FOUND,
         ] {
             let err = CanonicalError::unauthenticated().with_reason(r).create();
             let json = problem(err);
             assert_eq!(
                 json["context"]["reason"], r,
                 "auth reason {r} must reach unauthenticated.ctx.reason",
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_reason_constants_round_trip_to_service_unavailable_context() {
+        for r in [
+            reason::unavailable::REQUEST_NOT_SENT,
+            reason::unavailable::REQUEST_MAY_HAVE_BEEN_SENT,
+            reason::unavailable::UPSTREAM_DISABLED,
+            reason::unavailable::CREDENTIAL_STORE_UNAVAILABLE,
+            reason::unavailable::IDENTITY_PROVIDER_UNAVAILABLE,
+        ] {
+            let err = CanonicalError::service_unavailable()
+                .with_retry_after_seconds(5)
+                .with_reason(r)
+                .create();
+            let json = problem(err);
+            assert_eq!(
+                json["context"]["reason"], r,
+                "unavailable reason {r} must reach service_unavailable.ctx.reason",
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_reason_constants_round_trip_to_deadline_exceeded_context() {
+        for r in [
+            reason::timeout::REQUEST_NOT_SENT,
+            reason::timeout::REQUEST_MAY_HAVE_BEEN_SENT,
+        ] {
+            let err = ProxyScope::deadline_exceeded("timed out")
+                .with_reason(r)
+                .create();
+            let json = problem(err);
+            assert_eq!(
+                json["context"]["reason"], r,
+                "timeout reason {r} must reach deadline_exceeded.ctx.reason",
             );
         }
     }
@@ -594,7 +724,7 @@ mod projection_tests {
     //! `ServiceGatewayError` variant.
     use super::*;
     use crate::{field, reason};
-    use toolkit_canonical_errors::{CanonicalError, resource_error};
+    use toolkit_canonical_errors::{CanonicalError, Problem, resource_error};
     use toolkit_gts::gts_id;
 
     #[resource_error(gts_id!("cf.core.oagw.proxy.v1~"))]
@@ -686,7 +816,7 @@ mod projection_tests {
         let canonical = ProxyScope::deadline_exceeded("upstream did not respond in time").create();
         assert!(matches!(
             ServiceGatewayError::from(canonical),
-            ServiceGatewayError::Timeout
+            ServiceGatewayError::Timeout { reason: None }
         ));
     }
 
@@ -698,8 +828,238 @@ mod projection_tests {
         match ServiceGatewayError::from(canonical) {
             ServiceGatewayError::Unavailable {
                 retry_after_secs: Some(30),
+                reason: None,
             } => {}
             other => panic!("expected Unavailable with retry=30, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_unavailable_projects_typed_reasons() {
+        let cases = [
+            (
+                reason::unavailable::REQUEST_NOT_SENT,
+                UnavailableReason::RequestNotSent,
+            ),
+            (
+                reason::unavailable::REQUEST_MAY_HAVE_BEEN_SENT,
+                UnavailableReason::RequestMayHaveBeenSent,
+            ),
+            (
+                reason::unavailable::UPSTREAM_DISABLED,
+                UnavailableReason::UpstreamDisabled,
+            ),
+            (
+                reason::unavailable::CREDENTIAL_STORE_UNAVAILABLE,
+                UnavailableReason::CredentialStoreUnavailable,
+            ),
+            (
+                reason::unavailable::IDENTITY_PROVIDER_UNAVAILABLE,
+                UnavailableReason::IdentityProviderUnavailable,
+            ),
+            (
+                "SOMETHING_NEW",
+                UnavailableReason::Unknown("SOMETHING_NEW".into()),
+            ),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(UnavailableReason::from_wire(wire).as_wire(), wire);
+            let canonical = CanonicalError::service_unavailable()
+                .with_retry_after_seconds(7)
+                .with_reason(wire)
+                .create();
+            match ServiceGatewayError::from(canonical) {
+                ServiceGatewayError::Unavailable {
+                    retry_after_secs: Some(7),
+                    reason: Some(reason),
+                } => assert_eq!(reason, expected, "{wire}"),
+                other => panic!("{wire}: expected Unavailable with a reason, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_exceeded_projects_typed_reasons() {
+        let cases = [
+            (
+                reason::timeout::REQUEST_NOT_SENT,
+                TimeoutReason::RequestNotSent,
+            ),
+            (
+                reason::timeout::REQUEST_MAY_HAVE_BEEN_SENT,
+                TimeoutReason::RequestMayHaveBeenSent,
+            ),
+            (
+                "SOMETHING_NEW",
+                TimeoutReason::Unknown("SOMETHING_NEW".into()),
+            ),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(TimeoutReason::from_wire(wire).as_wire(), wire);
+            let canonical = ProxyScope::deadline_exceeded("timed out")
+                .with_reason(wire)
+                .create();
+            match ServiceGatewayError::from(canonical) {
+                ServiceGatewayError::Timeout {
+                    reason: Some(reason),
+                } => assert_eq!(reason, expected, "{wire}"),
+                other => panic!("{wire}: expected Timeout with a reason, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn request_not_sent_only_when_the_gateway_says_so() {
+        let unavailable = |reason: Option<&str>| {
+            let b = CanonicalError::service_unavailable();
+            ServiceGatewayError::from(match reason {
+                Some(r) => b.with_reason(r).create(),
+                None => b.create(),
+            })
+        };
+        let timeout = |reason: Option<&str>| {
+            let b = ProxyScope::deadline_exceeded("timed out");
+            ServiceGatewayError::from(match reason {
+                Some(r) => b.with_reason(r).create(),
+                None => b.create(),
+            })
+        };
+        let cases = [
+            (
+                unavailable(Some(reason::unavailable::REQUEST_NOT_SENT)),
+                true,
+            ),
+            (
+                unavailable(Some(reason::unavailable::UPSTREAM_DISABLED)),
+                true,
+            ),
+            (
+                unavailable(Some(reason::unavailable::CREDENTIAL_STORE_UNAVAILABLE)),
+                true,
+            ),
+            (
+                unavailable(Some(reason::unavailable::IDENTITY_PROVIDER_UNAVAILABLE)),
+                true,
+            ),
+            (
+                unavailable(Some(reason::unavailable::REQUEST_MAY_HAVE_BEEN_SENT)),
+                false,
+            ),
+            (unavailable(Some("SOMETHING_NEW")), false),
+            (unavailable(None), false),
+            (timeout(Some(reason::timeout::REQUEST_NOT_SENT)), true),
+            (
+                timeout(Some(reason::timeout::REQUEST_MAY_HAVE_BEEN_SENT)),
+                false,
+            ),
+            (timeout(Some("SOMETHING_NEW")), false),
+            (timeout(None), false),
+            (
+                ServiceGatewayError::RateLimited {
+                    retry_after_secs: None,
+                },
+                false,
+            ),
+            (
+                ServiceGatewayError::Internal {
+                    detail: String::new(),
+                },
+                false,
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.request_not_sent(), expected, "{err:?}");
+        }
+    }
+
+    /// Clients that rebuild the error from the problem body (REST callers)
+    /// get the same projection, reason included.
+    #[test]
+    fn dispatch_reasons_survive_problem_round_trip() {
+        let unavailable = CanonicalError::service_unavailable()
+            .with_retry_after_seconds(5)
+            .with_reason(reason::unavailable::REQUEST_MAY_HAVE_BEEN_SENT)
+            .with_override(toolkit_canonical_errors::Http::status_code(502))
+            .create();
+        let rebuilt = CanonicalError::try_from(Problem::from(unavailable)).expect("round trip");
+        assert!(matches!(
+            ServiceGatewayError::from(rebuilt),
+            ServiceGatewayError::Unavailable {
+                retry_after_secs: Some(5),
+                reason: Some(UnavailableReason::RequestMayHaveBeenSent),
+            }
+        ));
+
+        let timeout = ProxyScope::deadline_exceeded("timed out")
+            .with_reason(reason::timeout::REQUEST_NOT_SENT)
+            .create();
+        let rebuilt = CanonicalError::try_from(Problem::from(timeout)).expect("round trip");
+        assert!(matches!(
+            ServiceGatewayError::from(rebuilt),
+            ServiceGatewayError::Timeout {
+                reason: Some(TimeoutReason::RequestNotSent),
+            }
+        ));
+    }
+
+    /// An empty reason is none, on the wire and in process. A REST client
+    /// rebuilds the error from the problem body, where `"reason": ""` reads
+    /// as `None`; a context built in process can still hold `Some("")`, since
+    /// the field is public. Both paths project to `reason: None`, for both
+    /// categories that carry a reason.
+    #[test]
+    fn an_empty_reason_projects_to_none() {
+        fn from_empty_wire_reason(err: CanonicalError) -> CanonicalError {
+            let mut json = serde_json::to_value(Problem::from(err)).expect("Problem serializes");
+            json["context"]["reason"] = serde_json::Value::from("");
+            let problem: Problem = serde_json::from_value(json).expect("Problem deserializes");
+            CanonicalError::try_from(problem).expect("round trip")
+        }
+        fn with_empty_reason(mut err: CanonicalError) -> CanonicalError {
+            match &mut err {
+                CanonicalError::ServiceUnavailable { ctx, .. } => ctx.reason = Some(String::new()),
+                CanonicalError::DeadlineExceeded { ctx, .. } => ctx.reason = Some(String::new()),
+                other => panic!("no reason field on {other:?}"),
+            }
+            err
+        }
+        fn unavailable() -> CanonicalError {
+            CanonicalError::service_unavailable()
+                .with_retry_after_seconds(5)
+                .with_reason(reason::unavailable::UPSTREAM_DISABLED)
+                .create()
+        }
+        fn timeout() -> CanonicalError {
+            ProxyScope::deadline_exceeded("timed out")
+                .with_reason(reason::timeout::REQUEST_NOT_SENT)
+                .create()
+        }
+
+        for (path, err) in [
+            ("wire", from_empty_wire_reason(unavailable())),
+            ("in process", with_empty_reason(unavailable())),
+        ] {
+            let projected = ServiceGatewayError::from(err);
+            assert!(
+                matches!(
+                    projected,
+                    ServiceGatewayError::Unavailable {
+                        retry_after_secs: Some(5),
+                        reason: None,
+                    }
+                ),
+                "{path}: {projected:?}"
+            );
+        }
+        for (path, err) in [
+            ("wire", from_empty_wire_reason(timeout())),
+            ("in process", with_empty_reason(timeout())),
+        ] {
+            let projected = ServiceGatewayError::from(err);
+            assert!(
+                matches!(projected, ServiceGatewayError::Timeout { reason: None }),
+                "{path}: {projected:?}"
+            );
         }
     }
 
@@ -714,6 +1074,10 @@ mod projection_tests {
             (
                 reason::auth::PLUGIN_INTERNAL,
                 AuthFailureReason::PluginInternal,
+            ),
+            (
+                reason::auth::CREDENTIAL_NOT_FOUND,
+                AuthFailureReason::CredentialNotFound,
             ),
         ];
         for (wire_reason, expected) in cases {
@@ -1086,6 +1450,15 @@ mod projection_tests {
         assert!(matches!(
             StreamingError::from(other),
             StreamingError::Stream(_)
+        ));
+    }
+
+    #[test]
+    fn an_idle_cut_is_its_own_streaming_error() {
+        let idle: Box<dyn std::error::Error + Send + Sync> = Box::new(StreamIdleTimeout::new());
+        assert!(matches!(
+            StreamingError::from(idle),
+            StreamingError::IdleTimeout
         ));
     }
 }

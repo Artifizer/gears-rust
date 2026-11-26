@@ -52,6 +52,8 @@ Each is a format error like the one above, with this text in `detail` and `conte
 | `"rate_limit"` with `sustained.rate`, `burst.capacity` or `cost` of `0` | `rate_limit.sustained.rate must be at least 1` (`burst.capacity`, `cost` likewise) |
 | `"rate_limit"` whose `cost` exceeds the bucket capacity: `burst.capacity` for a token bucket with a burst, else `sustained.rate` (a sliding window ignores `burst`) | `rate_limit.cost (6) must not exceed rate_limit.burst.capacity (5)` (or `rate_limit.sustained.rate (5)`) |
 | `"rate_limit"` with a shared budget whose `total` is below `cost`: `{"cost": 4, "sustained": {"rate": 10, ...}, "budget": {"mode": "shared", "total": 3}}` | `rate_limit.cost (4) must not exceed rate_limit.budget.total (3)` |
+| `"circuit_breaker"` with `failure_threshold`, `timeout_seconds` or `success_threshold` of `0`, `enabled` or not | `circuit_breaker.failure_threshold must be at least 1` (`timeout_seconds`, `success_threshold` likewise) |
+| `"circuit_breaker"` with `failure_threshold` above 1000, `timeout_seconds` above 86400 or `success_threshold` above 100, `enabled` or not | `circuit_breaker.failure_threshold must be at most 1000` (`timeout_seconds` … `86400`, `success_threshold` … `100`) |
 | a child's `"rate_limit"` that wins the merge (`{"cost": 4, "sustained": {"rate": 10, "window": "minute"}}`) under an ancestor's shared budget of `total: 3` (`rate: 100`) | `rate_limit.cost (4) must not exceed budget.total (3) of the shared budget an ancestor's upstream defines for this alias` |
 
 The shared pool is charged the upstream's effective cost (see [18.7](../../rate-limiting/positive-18.7-budget-modes-behave-specified.md) scenario B), so the check uses the merged limit: a child limit that loses the merge to the ancestor's, or a non-enforced `private` one, is not charged to the pool and is accepted. A route's `cost` goes to the route's bucket only.
@@ -123,7 +125,7 @@ Content-Type: application/problem+json
       {
         "field": "auth.type",
         "reason": "NOT_IMPLEMENTED",
-        "description": "auth plugin 'gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.basic.v1' is not implemented; use one of [\"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.noop.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred_basic.v1\"]"
+        "description": "auth plugin 'gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.basic.v1' is not implemented; use one of [\"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.noop.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred_basic.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.aws_sigv4.v1\", \"gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.oauth2_client_cred_private_key_jwt.v1\"]"
       }
     ],
     "resource_type": "gts.cf.core.oagw.proxy.v1~"
@@ -142,7 +144,7 @@ There is one violation: the first rule that fails.
 | an auth plugin in `plugins.items` | `plugins.items.plugin_ref`, `VALIDATION` |
 | a guard or transform plugin in `auth.type` | `auth.type`, `VALIDATION` |
 
-Implemented plugins: auth `noop`, `apikey`, `oauth2_client_cred`, `oauth2_client_cred_basic`; guard `required_headers`; transform `request_id`.
+Implemented plugins: auth `noop`, `apikey`, `oauth2_client_cred`, `oauth2_client_cred_basic`, `aws_sigv4`, `oauth2_client_cred_private_key_jwt`; guard `required_headers`; transform `request_id`.
 
 ## Scenario D: plain HTTP upstream
 

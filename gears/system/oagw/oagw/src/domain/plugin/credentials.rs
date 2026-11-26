@@ -7,11 +7,13 @@ use credstore_sdk::{CredStoreError, SecretRef};
 use toolkit_macros::domain_model;
 
 use crate::domain::gateway_headers::is_gateway_owned_header;
+use crate::domain::plugin::PluginError;
 
 #[cfg(test)]
 use crate::domain::gts_helpers::{
-    APIKEY_AUTH_PLUGIN_ID, NOOP_AUTH_PLUGIN_ID, OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID,
-    OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID,
+    APIKEY_AUTH_PLUGIN_ID, AWS_SIGV4_AUTH_PLUGIN_ID, NOOP_AUTH_PLUGIN_ID,
+    OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID, OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID,
+    OAUTH2_CLIENT_CRED_PRIVATE_KEY_JWT_AUTH_PLUGIN_ID,
 };
 
 /// Auth config key of the `apikey` plugin's secret reference.
@@ -20,6 +22,14 @@ pub const SECRET_REF_KEY: &str = "secret_ref";
 pub const CLIENT_ID_REF_KEY: &str = "client_id_ref";
 /// Auth config key of the OAuth2 plugins' client secret reference.
 pub const CLIENT_SECRET_REF_KEY: &str = "client_secret_ref";
+/// Auth config key of the AWS SigV4 plugin's access key id reference.
+pub const ACCESS_KEY_ID_REF_KEY: &str = "access_key_id_ref";
+/// Auth config key of the AWS SigV4 plugin's secret access key reference.
+pub const SECRET_ACCESS_KEY_REF_KEY: &str = "secret_access_key_ref";
+/// Auth config key of the AWS SigV4 plugin's session token reference.
+pub const SESSION_TOKEN_REF_KEY: &str = "session_token_ref";
+/// Auth config key of the `private_key_jwt` plugin's signing key reference.
+pub const PRIVATE_KEY_REF_KEY: &str = "private_key_ref";
 
 /// An auth config key that holds a credential reference.
 #[domain_model]
@@ -43,30 +53,99 @@ const CLIENT_SECRET_REF: CredentialKey = CredentialKey {
     key: CLIENT_SECRET_REF_KEY,
     field: oagw_sdk::precondition::CLIENT_SECRET_REF,
 };
+const ACCESS_KEY_ID_REF: CredentialKey = CredentialKey {
+    key: ACCESS_KEY_ID_REF_KEY,
+    field: oagw_sdk::precondition::ACCESS_KEY_ID_REF,
+};
+const SECRET_ACCESS_KEY_REF: CredentialKey = CredentialKey {
+    key: SECRET_ACCESS_KEY_REF_KEY,
+    field: oagw_sdk::precondition::SECRET_ACCESS_KEY_REF,
+};
+const SESSION_TOKEN_REF: CredentialKey = CredentialKey {
+    key: SESSION_TOKEN_REF_KEY,
+    field: oagw_sdk::precondition::SESSION_TOKEN_REF,
+};
+const PRIVATE_KEY_REF: CredentialKey = CredentialKey {
+    key: PRIVATE_KEY_REF_KEY,
+    field: oagw_sdk::precondition::PRIVATE_KEY_REF,
+};
 
 /// Every key an implemented auth plugin reads a credential reference from,
 /// in the order writes check them. A write checks each one present in
 /// `auth.config`, whatever the configured plugin: a `secret_ref` was checked
 /// on every plugin before the OAuth2 keys were added, and a stored value
 /// stays valid if the upstream later switches to a plugin that reads it.
-pub const CREDENTIAL_KEYS: &[CredentialKey] = &[SECRET_REF, CLIENT_ID_REF, CLIENT_SECRET_REF];
+pub const CREDENTIAL_KEYS: &[CredentialKey] = &[
+    SECRET_REF,
+    CLIENT_ID_REF,
+    CLIENT_SECRET_REF,
+    ACCESS_KEY_ID_REF,
+    SECRET_ACCESS_KEY_REF,
+    SESSION_TOKEN_REF,
+    PRIVATE_KEY_REF,
+];
+
+/// The credential references an implemented auth plugin reads: the ones it
+/// needs and the ones it reads when present.
+#[cfg(test)]
+#[domain_model]
+pub struct PluginCredentialKeys {
+    /// Without any one of these the plugin refuses its config.
+    pub required: &'static [CredentialKey],
+    /// Read when present.
+    pub optional: &'static [CredentialKey],
+}
 
 /// The credential references each implemented auth plugin reads. The
-/// OAuth2 plugins read these constants; the `apikey` plugin reads
-/// `secret_ref` through [`ApiKeyAuthConfig::parse`]. Tests in `infra::plugin::registry` keep the
-/// list complete, check each plugin needs exactly these keys, and that every
-/// one is in [`CREDENTIAL_KEYS`].
+/// OAuth2 plugins read these constants (the `private_key_jwt` one through
+/// [`PrivateKeyJwtConfig::parse`]); the `apikey` plugin reads `secret_ref`
+/// through [`ApiKeyAuthConfig::parse`], the AWS SigV4 plugin its keys
+/// through `AwsSigV4AuthConfig::parse`. Tests in `infra::plugin::registry`
+/// keep the list complete, check each plugin needs exactly the required keys
+/// and reads the optional ones, and that every one is in [`CREDENTIAL_KEYS`].
 #[cfg(test)]
-pub const AUTH_PLUGIN_CREDENTIAL_KEYS: &[(&str, &[CredentialKey])] = &[
-    (NOOP_AUTH_PLUGIN_ID, &[]),
-    (APIKEY_AUTH_PLUGIN_ID, &[SECRET_REF]),
+pub const AUTH_PLUGIN_CREDENTIAL_KEYS: &[(&str, PluginCredentialKeys)] = &[
+    (
+        NOOP_AUTH_PLUGIN_ID,
+        PluginCredentialKeys {
+            required: &[],
+            optional: &[],
+        },
+    ),
+    (
+        APIKEY_AUTH_PLUGIN_ID,
+        PluginCredentialKeys {
+            required: &[SECRET_REF],
+            optional: &[],
+        },
+    ),
     (
         OAUTH2_CLIENT_CRED_AUTH_PLUGIN_ID,
-        &[CLIENT_ID_REF, CLIENT_SECRET_REF],
+        PluginCredentialKeys {
+            required: &[CLIENT_ID_REF, CLIENT_SECRET_REF],
+            optional: &[],
+        },
     ),
     (
         OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID,
-        &[CLIENT_ID_REF, CLIENT_SECRET_REF],
+        PluginCredentialKeys {
+            required: &[CLIENT_ID_REF, CLIENT_SECRET_REF],
+            optional: &[],
+        },
+    ),
+    (
+        AWS_SIGV4_AUTH_PLUGIN_ID,
+        PluginCredentialKeys {
+            required: &[ACCESS_KEY_ID_REF, SECRET_ACCESS_KEY_REF],
+            optional: &[SESSION_TOKEN_REF],
+        },
+    ),
+    (
+        OAUTH2_CLIENT_CRED_PRIVATE_KEY_JWT_AUTH_PLUGIN_ID,
+        PluginCredentialKeys {
+            required: &[CLIENT_ID_REF, PRIVATE_KEY_REF],
+            optional: &[],
+        },
     ),
 ];
 
@@ -84,6 +163,56 @@ pub(crate) fn credstore_error_kind(e: &credstore_sdk::CredStoreError) -> &'stati
         E::UnsupportedTransition { .. } => "unsupported sharing transition",
         E::TypeViolation { .. } => "secret type violation",
         E::Internal(_) => "internal error",
+    }
+}
+
+/// The auth plugin error for a failed credential store read of the secret
+/// referenced by `auth.config.<key>`, the same classification `request_ref`
+/// mode uses: a missing or refused secret is not found, an outage is
+/// unavailable (with the store's retry hint), an error only a write can
+/// cause is internal. The error names the key and the kind, never the
+/// reference or the store's text (F0008).
+pub(crate) fn credstore_read_error(key: &'static str, e: &CredStoreError) -> PluginError {
+    match e {
+        CredStoreError::NotFound
+        | CredStoreError::AccessDenied
+        | CredStoreError::InvalidSecretRef { .. } => PluginError::SecretNotFound {
+            key,
+            kind: credstore_error_kind(e),
+        },
+        CredStoreError::ServiceUnavailable { retry_after, .. } => {
+            PluginError::CredentialStoreUnavailable {
+                detail: format!(
+                    "credential store unavailable for auth.config.{key}: {}",
+                    credstore_error_kind(e)
+                ),
+                retry_after: *retry_after,
+            }
+        }
+        CredStoreError::NoPluginAvailable | CredStoreError::Internal(_) => {
+            PluginError::CredentialStoreUnavailable {
+                detail: format!(
+                    "credential store unavailable for auth.config.{key}: {}",
+                    credstore_error_kind(e)
+                ),
+                retry_after: None,
+            }
+        }
+        CredStoreError::Conflict
+        | CredStoreError::UnsupportedTransition { .. }
+        | CredStoreError::TypeViolation { .. } => PluginError::Internal(format!(
+            "credential store error for auth.config.{key}: {}",
+            credstore_error_kind(e)
+        )),
+    }
+}
+
+/// The auth plugin error for a read that found no secret under the
+/// reference in `auth.config.<key>`.
+pub(crate) fn secret_missing(key: &'static str) -> PluginError {
+    PluginError::SecretNotFound {
+        key,
+        kind: credstore_error_kind(&CredStoreError::NotFound),
     }
 }
 
@@ -232,7 +361,12 @@ pub struct AuthConfigError {
 }
 
 impl AuthConfigError {
-    fn new(field: &'static str, reason: &'static str, detail: impl Into<String>) -> Self {
+    /// A violation of `field` with `reason`, explained by `detail`.
+    pub(crate) fn new(
+        field: &'static str,
+        reason: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
             field,
             reason,
@@ -421,6 +555,441 @@ impl ApiKeyAuthConfig {
             ));
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OAuth2 `private_key_jwt` client authentication (RFC 7523 §2.2)
+// ---------------------------------------------------------------------------
+
+/// Auth config key of the `private_key_jwt` plugin's signing algorithm.
+pub const SIGNING_ALG_KEY: &str = "signing_alg";
+/// Auth config key of the `private_key_jwt` plugin's optional `kid` header.
+pub const KID_KEY: &str = "kid";
+/// Auth config key of the `private_key_jwt` plugin's optional assertion
+/// `aud`.
+pub const AUDIENCE_KEY: &str = "audience";
+/// Auth config key of the OAuth2 plugins' direct token endpoint.
+pub const TOKEN_ENDPOINT_KEY: &str = "token_endpoint";
+/// Auth config key of the OAuth2 plugins' OIDC issuer (Discovery).
+pub const ISSUER_URL_KEY: &str = "issuer_url";
+
+/// The field a `private_key_ref` violation names.
+pub const PRIVATE_KEY_REF_FIELD: &str = oagw_sdk::precondition::PRIVATE_KEY_REF;
+/// The field a `client_id_ref` violation names.
+pub const CLIENT_ID_REF_FIELD: &str = oagw_sdk::precondition::CLIENT_ID_REF;
+/// The field a `client_secret_ref` violation names.
+pub const CLIENT_SECRET_REF_FIELD: &str = oagw_sdk::precondition::CLIENT_SECRET_REF;
+/// The field a `signing_alg` violation names.
+pub const SIGNING_ALG_FIELD: &str = "auth.config.signing_alg";
+/// The field a `kid` violation names.
+pub const KID_FIELD: &str = "auth.config.kid";
+/// The field an `audience` violation names.
+pub const AUDIENCE_FIELD: &str = "auth.config.audience";
+/// The field a `token_endpoint` violation names.
+pub const TOKEN_ENDPOINT_FIELD: &str = "auth.config.token_endpoint";
+/// The field an `issuer_url` violation names.
+pub const ISSUER_URL_FIELD: &str = "auth.config.issuer_url";
+/// The longest `kid` a config accepts, in characters (JSON Schema
+/// `maxLength`).
+pub const MAX_KID_LEN: usize = 256;
+/// The longest `audience` a config accepts, in characters.
+pub const MAX_AUDIENCE_LEN: usize = 2048;
+
+/// JWS algorithm the client assertion is signed with: the ones the
+/// token client supports.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigningAlg {
+    /// ECDSA P-256 with SHA-256; the key is a P-256 key.
+    Es256,
+    /// RSASSA-PKCS1-v1_5 with SHA-256; the key is an RSA key.
+    Rs256,
+    /// RSASSA-PSS with SHA-256; the key is an RSA key.
+    Ps256,
+}
+
+impl SigningAlg {
+    /// Every algorithm, in the order the config schema lists them.
+    pub const ALL: [Self; 3] = [Self::Es256, Self::Rs256, Self::Ps256];
+
+    /// The stored value (the JWS `alg` name).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Es256 => "ES256",
+            Self::Rs256 => "RS256",
+            Self::Ps256 => "PS256",
+        }
+    }
+
+    /// Parse a stored value; exact match, `None` for anything else.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|alg| alg.as_str() == value)
+    }
+}
+
+/// The `private_key_jwt` keys of an OAuth2 client-credentials config,
+/// parsed once: the write check and the plugin both read them through
+/// [`Self::parse`]. The token endpoint, `client_id_ref` and `scopes` are
+/// read as for the client-secret plugins.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateKeyJwtConfig {
+    /// Reference to the signing key: an unencrypted PKCS#8 PEM in the
+    /// credential store.
+    pub private_key_ref: String,
+    /// Algorithm of the assertion; the key must be of its type.
+    pub signing_alg: SigningAlg,
+    /// `kid` header of the assertion, when the identity provider needs it to
+    /// pick the registered public key.
+    pub kid: Option<String>,
+    /// `aud` of the assertion, when the identity provider expects something
+    /// other than the token endpoint (its issuer, say). `None` sends the
+    /// token endpoint the request goes to.
+    pub audience: Option<String>,
+}
+
+/// An optional free-text key: when set, 1 to `max` characters (as JSON
+/// Schema `maxLength` counts them) and no control characters.
+fn optional_text(
+    config: Option<&HashMap<String, String>>,
+    key: &str,
+    field: &'static str,
+    max: usize,
+) -> Result<Option<String>, AuthConfigError> {
+    let value = config.and_then(|c| c.get(key)).cloned();
+    if let Some(value) = &value
+        && (value.is_empty() || value.chars().count() > max || value.chars().any(char::is_control))
+    {
+        return Err(AuthConfigError::new(
+            field,
+            oagw_sdk::field::INVALID_VALUE,
+            format!("{field}: must be 1 to {max} characters without control characters"),
+        ));
+    }
+    Ok(value)
+}
+
+/// One of `token_endpoint` and `issuer_url`, as an absolute URL.
+fn check_token_endpoint(config: Option<&HashMap<String, String>>) -> Result<(), AuthConfigError> {
+    let get = |key: &str| config.and_then(|c| c.get(key));
+    let (key, field) = match (get(TOKEN_ENDPOINT_KEY), get(ISSUER_URL_KEY)) {
+        (None, None) => {
+            return Err(AuthConfigError::new(
+                TOKEN_ENDPOINT_FIELD,
+                oagw_sdk::field::REQUIRED,
+                format!(
+                    "{TOKEN_ENDPOINT_FIELD}: one of {TOKEN_ENDPOINT_KEY} or {ISSUER_URL_KEY} is required"
+                ),
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(AuthConfigError::new(
+                ISSUER_URL_FIELD,
+                oagw_sdk::field::VALIDATION,
+                format!(
+                    "{ISSUER_URL_FIELD}: not allowed with {TOKEN_ENDPOINT_FIELD}; set exactly one"
+                ),
+            ));
+        }
+        (Some(_), None) => (TOKEN_ENDPOINT_KEY, TOKEN_ENDPOINT_FIELD),
+        (None, Some(_)) => (ISSUER_URL_KEY, ISSUER_URL_FIELD),
+    };
+    if get(key).is_some_and(|value| url::Url::parse(value).is_err()) {
+        return Err(AuthConfigError::new(
+            field,
+            oagw_sdk::field::INVALID_VALUE,
+            format!("{field}: not an absolute URL"),
+        ));
+    }
+    Ok(())
+}
+
+impl PrivateKeyJwtConfig {
+    /// Parse and check the keys: exactly one of `token_endpoint` and
+    /// `issuer_url`, an absolute URL; `client_id_ref` and `private_key_ref`
+    /// present, no `client_secret_ref` (the client authenticates with the
+    /// key only), a known `signing_alg`, and a `kid` and an `audience`, when
+    /// set, that are non-empty, at most [`MAX_KID_LEN`] and
+    /// [`MAX_AUDIENCE_LEN`] characters and free of control characters.
+    /// Reference syntax and access are checked like every other credential
+    /// reference ([`CREDENTIAL_KEYS`]).
+    ///
+    /// # Errors
+    ///
+    /// The first violation, naming its field. Never quotes a reference.
+    pub fn parse(config: Option<&HashMap<String, String>>) -> Result<Self, AuthConfigError> {
+        let get = |key: &str| config.and_then(|c| c.get(key));
+        check_token_endpoint(config)?;
+        if get(CLIENT_SECRET_REF_KEY).is_some() {
+            return Err(AuthConfigError::new(
+                CLIENT_SECRET_REF_FIELD,
+                oagw_sdk::field::VALIDATION,
+                format!(
+                    "{CLIENT_SECRET_REF_FIELD}: not allowed with private_key_jwt client \
+                     authentication; the client authenticates with {PRIVATE_KEY_REF_FIELD}"
+                ),
+            ));
+        }
+        if get(CLIENT_ID_REF_KEY).is_none() {
+            return Err(AuthConfigError::new(
+                CLIENT_ID_REF_FIELD,
+                oagw_sdk::field::REQUIRED,
+                format!("{CLIENT_ID_REF_FIELD}: required by the OAuth2 auth plugins"),
+            ));
+        }
+        let private_key_ref = get(PRIVATE_KEY_REF_KEY).cloned().ok_or_else(|| {
+            AuthConfigError::new(
+                PRIVATE_KEY_REF_FIELD,
+                oagw_sdk::field::REQUIRED,
+                format!(
+                    "{PRIVATE_KEY_REF_FIELD}: required with private_key_jwt client authentication"
+                ),
+            )
+        })?;
+        let allowed = || {
+            SigningAlg::ALL
+                .iter()
+                .map(|alg| format!("'{}'", alg.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let signing_alg = match get(SIGNING_ALG_KEY) {
+            None => {
+                return Err(AuthConfigError::new(
+                    SIGNING_ALG_FIELD,
+                    oagw_sdk::field::REQUIRED,
+                    format!("{SIGNING_ALG_FIELD}: required; one of {}", allowed()),
+                ));
+            }
+            Some(value) => SigningAlg::parse(value).ok_or_else(|| {
+                AuthConfigError::new(
+                    SIGNING_ALG_FIELD,
+                    oagw_sdk::field::INVALID_VALUE,
+                    format!("{SIGNING_ALG_FIELD}: must be one of {}", allowed()),
+                )
+            })?,
+        };
+        let kid = optional_text(config, KID_KEY, KID_FIELD, MAX_KID_LEN)?;
+        let audience = optional_text(config, AUDIENCE_KEY, AUDIENCE_FIELD, MAX_AUDIENCE_LEN)?;
+        Ok(Self {
+            private_key_ref,
+            signing_alg,
+            kid,
+            audience,
+        })
+    }
+}
+
+#[cfg(test)]
+mod private_key_jwt_config_tests {
+    use super::*;
+
+    fn config(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    const BASE: &[(&str, &str)] = &[
+        ("token_endpoint", "https://idp.example.com/token"),
+        ("client_id_ref", "cred://client-id"),
+        ("private_key_ref", "cred://signing-key"),
+    ];
+
+    fn with(extra: &[(&str, &str)]) -> HashMap<String, String> {
+        let mut c = config(BASE);
+        c.extend(config(extra));
+        c
+    }
+
+    #[test]
+    fn each_algorithm_parses_and_kid_is_optional() {
+        for alg in SigningAlg::ALL {
+            let parsed =
+                PrivateKeyJwtConfig::parse(Some(&with(&[("signing_alg", alg.as_str())]))).unwrap();
+            assert_eq!(parsed.signing_alg, alg);
+            assert_eq!(parsed.private_key_ref, "cred://signing-key");
+            assert_eq!(parsed.kid, None);
+        }
+        let parsed = PrivateKeyJwtConfig::parse(Some(&with(&[
+            ("signing_alg", "ES256"),
+            ("kid", "key-2026-11"),
+            ("audience", "https://idp.example.com"),
+        ])))
+        .unwrap();
+        assert_eq!(parsed.kid.as_deref(), Some("key-2026-11"));
+        assert_eq!(parsed.audience.as_deref(), Some("https://idp.example.com"));
+        let mut discovery = with(&[("signing_alg", "ES256")]);
+        discovery.remove("token_endpoint");
+        discovery.insert("issuer_url".into(), "https://idp.example.com".into());
+        assert!(PrivateKeyJwtConfig::parse(Some(&discovery)).is_ok());
+    }
+
+    /// The length limits count characters, as JSON Schema `maxLength` does,
+    /// not UTF-8 bytes.
+    #[test]
+    fn kid_and_audience_limits_count_characters() {
+        for (key, field, max) in [
+            ("kid", KID_FIELD, MAX_KID_LEN),
+            ("audience", AUDIENCE_FIELD, MAX_AUDIENCE_LEN),
+        ] {
+            // Three UTF-8 bytes per character: over the limit in bytes.
+            let at_limit = "\u{20ac}".repeat(max);
+            assert!(at_limit.len() > max);
+            let parsed = PrivateKeyJwtConfig::parse(Some(&with(&[
+                ("signing_alg", "ES256"),
+                (key, &at_limit),
+            ])))
+            .unwrap();
+            let value = if key == "kid" {
+                parsed.kid
+            } else {
+                parsed.audience
+            };
+            assert_eq!(value.as_deref(), Some(at_limit.as_str()));
+
+            let over = "\u{20ac}".repeat(max + 1);
+            let err =
+                PrivateKeyJwtConfig::parse(Some(&with(&[("signing_alg", "ES256"), (key, &over)])))
+                    .unwrap_err();
+            assert_eq!(
+                (err.field, err.reason),
+                (field, oagw_sdk::field::INVALID_VALUE)
+            );
+        }
+    }
+
+    #[test]
+    fn each_violation_names_its_field_and_reason() {
+        let long_kid = "k".repeat(MAX_KID_LEN + 1);
+        let long_audience = "a".repeat(MAX_AUDIENCE_LEN + 1);
+        /// The config, then the field and reason the error names.
+        type Case = (HashMap<String, String>, &'static str, &'static str);
+        let cases: Vec<Case> = vec![
+            (
+                with(&[("signing_alg", "ES256"), ("client_secret_ref", "cred://s")]),
+                CLIENT_SECRET_REF_FIELD,
+                oagw_sdk::field::VALIDATION,
+            ),
+            (
+                {
+                    let mut c = with(&[("signing_alg", "ES256")]);
+                    c.remove("private_key_ref");
+                    c
+                },
+                PRIVATE_KEY_REF_FIELD,
+                oagw_sdk::field::REQUIRED,
+            ),
+            (
+                {
+                    let mut c = with(&[("signing_alg", "ES256")]);
+                    c.remove("client_id_ref");
+                    c
+                },
+                CLIENT_ID_REF_FIELD,
+                oagw_sdk::field::REQUIRED,
+            ),
+            (with(&[]), SIGNING_ALG_FIELD, oagw_sdk::field::REQUIRED),
+            (
+                with(&[("signing_alg", "HS256")]),
+                SIGNING_ALG_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                with(&[("signing_alg", "es256")]),
+                SIGNING_ALG_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                with(&[("signing_alg", "ES256"), ("kid", "")]),
+                KID_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                with(&[("signing_alg", "ES256"), ("kid", &long_kid)]),
+                KID_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                with(&[("signing_alg", "ES256"), ("kid", "a\nb")]),
+                KID_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                with(&[("signing_alg", "ES256"), ("audience", "")]),
+                AUDIENCE_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                with(&[("signing_alg", "ES256"), ("audience", &long_audience)]),
+                AUDIENCE_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                with(&[("signing_alg", "ES256"), ("audience", "https://a\tb")]),
+                AUDIENCE_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                {
+                    let mut c = with(&[("signing_alg", "ES256")]);
+                    c.remove("token_endpoint");
+                    c
+                },
+                TOKEN_ENDPOINT_FIELD,
+                oagw_sdk::field::REQUIRED,
+            ),
+            (
+                with(&[
+                    ("signing_alg", "ES256"),
+                    ("issuer_url", "https://idp.example.com"),
+                ]),
+                ISSUER_URL_FIELD,
+                oagw_sdk::field::VALIDATION,
+            ),
+            (
+                with(&[("signing_alg", "ES256"), ("token_endpoint", "/token")]),
+                TOKEN_ENDPOINT_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+            (
+                {
+                    let mut c = with(&[("signing_alg", "ES256")]);
+                    c.remove("token_endpoint");
+                    c.insert("issuer_url".into(), "idp.example.com".into());
+                    c
+                },
+                ISSUER_URL_FIELD,
+                oagw_sdk::field::INVALID_VALUE,
+            ),
+        ];
+        for (config, field, reason) in cases {
+            let err = PrivateKeyJwtConfig::parse(Some(&config)).unwrap_err();
+            assert_eq!((err.field, err.reason), (field, reason), "{config:?}");
+            assert!(err.detail.starts_with(field), "{}", err.detail);
+            assert!(
+                !err.detail.contains("signing-key") && !err.detail.contains("cred://"),
+                "never quotes a reference: {}",
+                err.detail
+            );
+        }
+        assert_eq!(
+            PrivateKeyJwtConfig::parse(None).unwrap_err().field,
+            TOKEN_ENDPOINT_FIELD
+        );
+    }
+
+    #[test]
+    fn unknown_algorithm_lists_the_allowed_ones() {
+        let err = PrivateKeyJwtConfig::parse(Some(&with(&[("signing_alg", "ES512")]))).unwrap_err();
+        assert_eq!(
+            err.detail,
+            "auth.config.signing_alg: must be one of 'ES256', 'RS256', 'PS256'"
+        );
     }
 }
 
